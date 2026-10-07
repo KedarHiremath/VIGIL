@@ -1,57 +1,7 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
-.Python
-.venv/
-venv/
-env/
-ENV/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-# Jupyter
-.ipynb_checkpoints/
-# Environment variables and secrets
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-# Data, video, audio, and model artifacts
-data/
-datasets/
-videos/
-footage/
-recordings/
-models/
-checkpoints/
-weights/
-*.pt
-*.pth
-*.onnx
-*.ckpt
-*.h5
-*.mp4
-*.avi
-*.mov
-*.mkv
-*.webm
-*.wav
-*.mp3
-# Generated outputs and logs
-outputs/
-reports/
-artifacts/
-runs/
-logs/
-*.log
-# IDE and OS files
-.vscode/
-.idea/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
+index.json
+.freecut-workspace.json
+
+# Local sample/test videos
+sample_videos/
+projects/
+media/
