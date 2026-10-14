@@ -12,8 +12,7 @@ class EvidenceAssessment(DomainModel):
     """Records an assessment of evidence supporting an observation or event."""
 
     assessment_id: str = Field(
-        min_length=1,
-        description="Stable unique identifier for this assessment."
+        min_length=1, description="Stable unique identifier for this assessment."
     )
 
     target_type: Literal["observation", "event"] = Field(
@@ -21,40 +20,34 @@ class EvidenceAssessment(DomainModel):
     )
 
     target_id: str = Field(
-        min_length=1,
-        description="ID of the observation or event being assessed."
+        min_length=1, description="ID of the observation or event being assessed."
     )
 
     assessment_type: Literal[
         "evidence_quality",
         "support_level",
         "uncertainty",
-    ] = Field(
-        description="Dimension of evidence being evaluated."
-    )
+    ] = Field(description="Dimension of evidence being evaluated.")
 
     rating: Literal[
         "insufficient",
         "low",
         "moderate",
         "high",
-    ] = Field(
-        description="Qualitative assessment of the selected dimension."
-    )
+    ] = Field(description="Qualitative assessment of the selected dimension.")
 
     rationale: str = Field(
-        min_length=1,
-        description="Explanation supporting the assessment."
+        min_length=1, description="Explanation supporting the assessment."
     )
 
     assessed_by: str = Field(
         min_length=1,
-        description="Name or identifier of the assessor or assessment tool."
+        description="Name or identifier of the assessor or assessment tool.",
     )
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
-        description="Timezone-aware time when the assessment was recorded."
+        description="Timezone-aware time when the assessment was recorded.",
     )
 
     @field_validator("created_at")

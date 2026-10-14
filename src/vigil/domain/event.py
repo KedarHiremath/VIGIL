@@ -12,8 +12,7 @@ class Event(DomainModel):
     """Represents an occurrence supported by investigation evidence."""
 
     event_id: str = Field(
-        min_length=1,
-        description="Stable unique identifier for this event."
+        min_length=1, description="Stable unique identifier for this event."
     )
 
     event_type: str = Field(
@@ -21,22 +20,20 @@ class Event(DomainModel):
         description=(
             "Category of occurrence, such as restricted_area_entry "
             "or vehicle_departure."
-        )
+        ),
     )
 
     description: str = Field(
-        min_length=1,
-        description="Human-readable description of the occurrence."
+        min_length=1, description="Human-readable description of the occurrence."
     )
 
     observation_ids: list[str] = Field(
-        min_length=1,
-        description="Observation IDs supporting this event."
+        min_length=1, description="Observation IDs supporting this event."
     )
 
     entity_ids: list[str] = Field(
         default_factory=list,
-        description="Optional entity IDs associated with the event."
+        description="Optional entity IDs associated with the event.",
     )
 
     status: Literal[
@@ -44,23 +41,16 @@ class Event(DomainModel):
         "under_review",
         "confirmed",
         "rejected",
-    ] = Field(
-        default="proposed",
-        description="Current review state of the event."
-    )
+    ] = Field(default="proposed", description="Current review state of the event.")
 
     start_time: datetime | None = Field(
         default=None,
-        description=(
-            "Optional timezone-aware estimated wall-clock start time."
-        )
+        description=("Optional timezone-aware estimated wall-clock start time."),
     )
 
     end_time: datetime | None = Field(
         default=None,
-        description=(
-            "Optional timezone-aware estimated wall-clock end time."
-        )
+        description=("Optional timezone-aware estimated wall-clock end time."),
     )
 
     @field_validator("observation_ids", "entity_ids")
@@ -75,13 +65,9 @@ class Event(DomainModel):
 
     @field_validator("start_time", "end_time")
     @classmethod
-    def validate_timestamps(
-        cls, value: datetime | None
-    ) -> datetime | None:
+    def validate_timestamps(cls, value: datetime | None) -> datetime | None:
         """Require timezone-aware event timestamps."""
-        if value is not None and (
-            value.tzinfo is None or value.utcoffset() is None
-        ):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("Event timestamps must be timezone-aware.")
         return value
 

@@ -11,8 +11,7 @@ class Entity(DomainModel):
     """Represents a detected or tracked entity in an investigation."""
 
     entity_id: str = Field(
-        min_length=1,
-        description="Stable identifier for this tracked entity."
+        min_length=1, description="Stable identifier for this tracked entity."
     )
 
     entity_type: Literal[
@@ -21,36 +20,27 @@ class Entity(DomainModel):
         "animal",
         "object",
         "unknown",
-    ] = Field(
-        description="Category assigned to the detected or tracked entity."
-    )
+    ] = Field(description="Category assigned to the detected or tracked entity.")
 
     label: str | None = Field(
         default=None,
         description=(
             "Optional human-readable label; not necessarily a verified identity."
-        )
+        ),
     )
 
     associated_observation_ids: list[str] = Field(
-        min_length=1,
-        description=(
-            "IDs of observations associated with this entity."
-        )
+        min_length=1, description=("IDs of observations associated with this entity.")
     )
 
     attributes: dict[str, str | int | float | bool | None] = Field(
         default_factory=dict,
-        description=(
-            "Optional structured attributes, such as color or vehicle type."
-        )
+        description=("Optional structured attributes, such as color or vehicle type."),
     )
 
     @field_validator("associated_observation_ids")
     @classmethod
-    def validate_observation_ids(
-        cls, values: list[str]
-    ) -> list[str]:
+    def validate_observation_ids(cls, values: list[str]) -> list[str]:
         """Reject blank or duplicate observation references."""
         if any(not value.strip() for value in values):
             raise ValueError("Observation IDs must not be blank.")

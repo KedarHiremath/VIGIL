@@ -13,18 +13,15 @@ class EventLink(DomainModel):
     """Represents a typed relationship between two distinct events."""
 
     event_link_id: str = Field(
-        min_length=1,
-        description="Stable unique identifier for this relationship."
+        min_length=1, description="Stable unique identifier for this relationship."
     )
 
     from_event_id: str = Field(
-        min_length=1,
-        description="ID of the source event in the relationship."
+        min_length=1, description="ID of the source event in the relationship."
     )
 
     to_event_id: str = Field(
-        min_length=1,
-        description="ID of the destination event in the relationship."
+        min_length=1, description="ID of the destination event in the relationship."
     )
 
     relationship_type: Literal[
@@ -33,13 +30,10 @@ class EventLink(DomainModel):
         "overlaps",
         "related_to",
         "possible_same_incident",
-    ] = Field(
-        description="Type of relationship between the two events."
-    )
+    ] = Field(description="Type of relationship between the two events.")
 
     rationale: str = Field(
-        min_length=1,
-        description="Explanation for recording this relationship."
+        min_length=1, description="Explanation for recording this relationship."
     )
 
     confidence: float | None = Field(
@@ -49,19 +43,17 @@ class EventLink(DomainModel):
         description=(
             "Optional producer-reported confidence score; "
             "not necessarily a calibrated probability."
-        )
+        ),
     )
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
-        description="Timezone-aware time when the relationship was recorded."
+        description="Timezone-aware time when the relationship was recorded.",
     )
 
     @field_validator("confidence")
     @classmethod
-    def validate_confidence(
-        cls, value: float | None
-    ) -> float | None:
+    def validate_confidence(cls, value: float | None) -> float | None:
         """Reject non-finite confidence values."""
         if value is not None and not math.isfinite(value):
             raise ValueError("Confidence must be finite.")

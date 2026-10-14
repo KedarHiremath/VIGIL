@@ -18,40 +18,36 @@ class Provenance(DomainModel):
         "agent",
         "human",
         "other",
-    ] = Field(
-        description="Category of the component or person producing the result."
-    )
+    ] = Field(description="Category of the component or person producing the result.")
 
     producer_name: str = Field(
-        min_length=1,
-        description="Name of the model, tool, rule, agent, or person."
+        min_length=1, description="Name of the model, tool, rule, agent, or person."
     )
 
     producer_version: str | None = Field(
-        default=None,
-        description="Optional version of the producing component."
+        default=None, description="Optional version of the producing component."
     )
 
     method: str = Field(
         min_length=1,
-        description="Analysis method or operation used to produce the result."
+        description="Analysis method or operation used to produce the result.",
     )
 
     input_artifact_ids: list[str] = Field(
         default_factory=list,
-        description="IDs of derived media artifacts consumed during analysis."
+        description="IDs of derived media artifacts consumed during analysis.",
     )
 
     parent_observation_ids: list[str] = Field(
         default_factory=list,
         description=(
             "IDs of earlier observations used to derive or refine this result."
-        )
+        ),
     )
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
-        description="Timezone-aware timestamp when the result was produced."
+        description="Timezone-aware timestamp when the result was produced.",
     )
 
     @field_validator("created_at")
@@ -64,9 +60,7 @@ class Provenance(DomainModel):
 
     @field_validator("input_artifact_ids", "parent_observation_ids")
     @classmethod
-    def validate_unique_references(
-        cls, values: list[str]
-    ) -> list[str]:
+    def validate_unique_references(cls, values: list[str]) -> list[str]:
         """Reject blank or duplicate references."""
         if any(not value.strip() for value in values):
             raise ValueError("References must not be blank.")

@@ -5,7 +5,6 @@ from typing import Literal
 
 from pydantic import Field, field_validator
 
-from vigil.domain.artifact import Artifact
 from vigil.domain.base import DomainModel
 from vigil.domain.provenance import Provenance
 from vigil.domain.source_reference import SourceReference
@@ -15,8 +14,7 @@ class Observation(DomainModel):
     """Represents a finding produced by analyzing source media."""
 
     observation_id: str = Field(
-        min_length=1,
-        description="Stable unique identifier for this observation."
+        min_length=1, description="Stable unique identifier for this observation."
     )
 
     modality: Literal["video", "audio", "image"] = Field(
@@ -28,24 +26,21 @@ class Observation(DomainModel):
         description=(
             "Kind of finding, such as person_detection, motion, "
             "action, or audio_transcription."
-        )
+        ),
     )
 
     description: str = Field(
-        min_length=1,
-        description="Human-readable description of the finding."
+        min_length=1, description="Human-readable description of the finding."
     )
 
     source_references: list[SourceReference] = Field(
         min_length=1,
-        description=(
-            "One or more source-media intervals supporting the observation."
-        )
+        description=("One or more source-media intervals supporting the observation."),
     )
 
     artifact_ids: list[str] = Field(
         default_factory=list,
-        description="IDs of derived artifacts associated with the finding."
+        description="IDs of derived artifacts associated with the finding.",
     )
 
     confidence: float | None = Field(
@@ -55,7 +50,7 @@ class Observation(DomainModel):
         description=(
             "Optional producer-reported confidence score between 0 and 1; "
             "not necessarily a calibrated probability."
-        )
+        ),
     )
 
     provenance: Provenance = Field(
@@ -64,9 +59,7 @@ class Observation(DomainModel):
 
     @field_validator("confidence")
     @classmethod
-    def validate_confidence(
-        cls, value: float | None
-    ) -> float | None:
+    def validate_confidence(cls, value: float | None) -> float | None:
         """Reject NaN and infinite confidence scores."""
         if value is not None and not math.isfinite(value):
             raise ValueError("Confidence must be finite.")
