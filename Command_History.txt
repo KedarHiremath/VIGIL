@@ -1,0 +1,8 @@
+uv init --package
+(Get-Content pyproject.toml) -replace 'requires-python = ".*"', 'requires-python = ">=3.12,<3.13"' | Set-Content pyproject.toml
+uv python install 3.12
+uv python pin 3.12
+uv venv --python 3.12
+.venv\Scripts\activate
+uv sync
+uv run python --version
