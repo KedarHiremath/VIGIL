@@ -1,9 +1,8 @@
 """Derived media artifact schema."""
 
-from datetime import datetime, timezone
-from typing import Literal
-import math
 import re
+from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -40,8 +39,7 @@ class Artifact(DomainModel):
 
     source_reference: SourceReference = Field(
         description=(
-            "Original media and timeline interval from which "
-            "this artifact was derived."
+            "Original media and timeline interval from which this artifact was derived."
         ),
     )
 
@@ -54,7 +52,7 @@ class Artifact(DomainModel):
     )
 
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         description="Timezone-aware timestamp when the artifact was created.",
     )
 
@@ -70,9 +68,7 @@ class Artifact(DomainModel):
     @classmethod
     def validate_sha256(cls, value: str | None) -> str | None:
         """Validate the optional SHA-256 checksum."""
-        if value is not None and not re.fullmatch(
-            r"[0-9a-fA-F]{64}", value
-        ):
+        if value is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", value):
             raise ValueError("SHA-256 must contain 64 hexadecimal characters.")
         return value
 

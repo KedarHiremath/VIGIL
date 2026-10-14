@@ -1,6 +1,5 @@
 """Camera metadata schema."""
 
-from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, field_validator
@@ -55,9 +54,7 @@ class Camera(DomainModel):
 
     @field_validator("clock_offset_seconds")
     @classmethod
-    def validate_clock_offset(
-        cls, value: float | None
-    ) -> float | None:
+    def validate_clock_offset(cls, value: float | None) -> float | None:
         """Reject infinite and NaN clock offsets."""
         if value is not None:
             import math

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -63,9 +63,7 @@ def test_source_reference_accepts_valid_interval() -> None:
         media_asset_id="media_001",
         start_seconds=10.0,
         end_seconds=15.0,
-        source_timestamp=datetime(
-            2026, 10, 14, 10, 0, tzinfo=timezone.utc
-        ),
+        source_timestamp=datetime(2026, 10, 14, 10, 0, tzinfo=UTC),
     )
 
     assert reference.end_seconds > reference.start_seconds

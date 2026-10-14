@@ -8,3 +8,20 @@ uv venv --python 3.12
 uv sync
 uv run python --version
 
+// Synchronize libraries
+uv sync
+
+// Ran for domain folder testing
+uv sync
+uv run pytest tests/unit/domain/test_source_media_schemas.py -v
+uv run ruff check src/vigil/domain tests/unit/domain
+uv run ruff format --check src/vigil/domain tests/unit/domain
+
+//FIX
+uv run ruff check --fix src/vigil/domain tests/unit/domain
+uv run ruff format src/vigil/domain tests/unit/domain
+
+// Check again
+uv run pytest tests/unit/domain/test_source_media_schemas.py -v
+uv run ruff check src/vigil/domain tests/unit/domain
+uv run ruff format --check src/vigil/domain tests/unit/domain

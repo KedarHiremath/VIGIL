@@ -8,7 +8,16 @@ authors = [
     { name = "kriti03ka", email = "kritikakhedkar.20@gmail.com" },
 ]
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "pydantic>=2.7,<3",
+    "tzdata",
+]
+
+[dependency-groups]
+dev = [
+"pytest>=8.0",
+"ruff>=0.9",
+]
 
 [project.scripts]
 vigil = "vigil:main"
@@ -16,3 +25,7 @@ vigil = "vigil:main"
 [build-system]
 requires = ["uv_build>=0.10.7,<0.11.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "vigil"
+module-root = "src"

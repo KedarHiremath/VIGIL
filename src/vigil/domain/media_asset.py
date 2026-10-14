@@ -1,9 +1,9 @@
 """Original media asset schema."""
 
-from datetime import datetime
-from typing import Literal
 import math
 import re
+from datetime import datetime
+from typing import Literal
 
 from pydantic import Field, field_validator
 
@@ -70,9 +70,7 @@ class MediaAsset(DomainModel):
 
     @field_validator("duration_seconds")
     @classmethod
-    def validate_duration(
-        cls, value: float | None
-    ) -> float | None:
+    def validate_duration(cls, value: float | None) -> float | None:
         """Reject non-finite durations."""
         if value is not None and not math.isfinite(value):
             raise ValueError("Duration must be finite.")
@@ -80,13 +78,9 @@ class MediaAsset(DomainModel):
 
     @field_validator("recorded_at")
     @classmethod
-    def validate_recorded_at(
-        cls, value: datetime | None
-    ) -> datetime | None:
+    def validate_recorded_at(cls, value: datetime | None) -> datetime | None:
         """Require a timezone-aware recording timestamp."""
-        if value is not None and (
-            value.tzinfo is None or value.utcoffset() is None
-        ):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("Recording timestamp must be timezone-aware.")
         return value
 
@@ -94,8 +88,6 @@ class MediaAsset(DomainModel):
     @classmethod
     def validate_sha256(cls, value: str | None) -> str | None:
         """Validate the optional SHA-256 checksum."""
-        if value is not None and not re.fullmatch(
-            r"[0-9a-fA-F]{64}", value
-        ):
+        if value is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", value):
             raise ValueError("SHA-256 must contain 64 hexadecimal characters.")
         return value

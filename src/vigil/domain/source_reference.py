@@ -1,7 +1,7 @@
 """Source evidence reference schema."""
 
-from datetime import datetime
 import math
+from datetime import datetime
 
 from pydantic import Field, field_validator, model_validator
 
@@ -19,16 +19,14 @@ class SourceReference(DomainModel):
     start_seconds: float = Field(
         ge=0,
         description=(
-            "Inclusive start position in seconds on the original "
-            "media timeline."
+            "Inclusive start position in seconds on the original media timeline."
         ),
     )
 
     end_seconds: float = Field(
         gt=0,
         description=(
-            "Exclusive end position in seconds on the original "
-            "media timeline."
+            "Exclusive end position in seconds on the original media timeline."
         ),
     )
 
@@ -50,13 +48,9 @@ class SourceReference(DomainModel):
 
     @field_validator("source_timestamp")
     @classmethod
-    def validate_source_timestamp(
-        cls, value: datetime | None
-    ) -> datetime | None:
+    def validate_source_timestamp(cls, value: datetime | None) -> datetime | None:
         """Require timezone information when wall-clock time is known."""
-        if value is not None and (
-            value.tzinfo is None or value.utcoffset() is None
-        ):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("Source timestamp must be timezone-aware.")
         return value
 

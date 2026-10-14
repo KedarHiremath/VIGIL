@@ -1,2 +1,12 @@
 .env
-.venv
+
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
