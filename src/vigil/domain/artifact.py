@@ -7,14 +7,14 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 
 from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier, Timestamp
 from vigil.domain.source_reference import SourceReference
 
 
 class Artifact(DomainModel):
     """Represents media derived from an original source."""
 
-    artifact_id: str = Field(
-        min_length=1,
+    artifact_id: Identifier = Field(
         description="Stable unique identifier for the derived artifact.",
     )
 
@@ -51,7 +51,7 @@ class Artifact(DomainModel):
         ),
     )
 
-    created_at: datetime = Field(
+    created_at: Timestamp = Field(
         default_factory=lambda: datetime.now(UTC),
         description="Timezone-aware timestamp when the artifact was created.",
     )
@@ -70,14 +70,6 @@ class Artifact(DomainModel):
         """Validate the optional SHA-256 checksum."""
         if value is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", value):
             raise ValueError("SHA-256 must contain 64 hexadecimal characters.")
-        return value
-
-    @field_validator("created_at")
-    @classmethod
-    def validate_created_at(cls, value: datetime) -> datetime:
-        """Require a timezone-aware creation timestamp."""
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("Creation timestamp must be timezone-aware.")
         return value
 
     @model_validator(mode="after")
