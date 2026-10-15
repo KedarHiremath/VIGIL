@@ -178,3 +178,86 @@ def test_report_rejects_blank_summary() -> None:
             summary="   ",
             generated_by="report-builder",
         )
+
+
+from datetime import datetime
+
+import pytest
+from pydantic import ValidationError
+
+from vigil.domain.coverage import CoverageRecord, CoverageStatus
+from vigil.domain.investigation import Investigation
+from vigil.domain.report import Report
+
+
+def test_investigation_normalizes_shared_identifiers() -> None:
+    investigation = Investigation(
+        investigation_id=" inv-001 ",
+        title="Security review",
+        objective="Review source footage",
+        scope_description="Main entrance",
+        media_asset_ids=[" media-001 "],
+    )
+
+    assert investigation.investigation_id == "inv-001"
+    assert investigation.media_asset_ids == ["media-001"]
+
+
+def test_investigation_rejects_duplicate_references_after_normalization() -> None:
+    with pytest.raises(ValidationError):
+        Investigation(
+            investigation_id="inv-001",
+            title="Security review",
+            objective="Review source footage",
+            scope_description="Main entrance",
+            media_asset_ids=["media-001", " media-001 "],
+        )
+
+
+def test_coverage_rejects_naive_timestamps() -> None:
+    with pytest.raises(ValidationError):
+        CoverageRecord(
+            coverage_id="coverage-001",
+            investigation_id="inv-001",
+            source_reference_id="source-001",
+            status=CoverageStatus.PARTIAL,
+            examined_at=datetime(2026, 10, 15, 9, 0),
+        )
+
+
+def test_coverage_rejects_duplicate_artifact_ids_after_normalization() -> None:
+    with pytest.raises(ValidationError):
+        CoverageRecord(
+            coverage_id="coverage-001",
+            investigation_id="inv-001",
+            source_reference_id="source-001",
+            status=CoverageStatus.PARTIAL,
+            artifact_ids=["artifact-001", " artifact-001 "],
+        )
+
+
+def test_report_normalizes_shared_identifiers_and_references() -> None:
+    report = Report(
+        report_id=" report-001 ",
+        investigation_id=" inv-001 ",
+        title="Investigation report",
+        summary="Summary of findings",
+        observation_ids=[" obs-001 "],
+        generated_by="report-generator",
+    )
+
+    assert report.report_id == "report-001"
+    assert report.investigation_id == "inv-001"
+    assert report.observation_ids == ["obs-001"]
+
+
+def test_report_rejects_duplicate_references_after_normalization() -> None:
+    with pytest.raises(ValidationError):
+        Report(
+            report_id="report-001",
+            investigation_id="inv-001",
+            title="Investigation report",
+            summary="Summary of findings",
+            observation_ids=["obs-001", " obs-001 "],
+            generated_by="report-generator",
+        )

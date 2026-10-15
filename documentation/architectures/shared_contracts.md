@@ -193,3 +193,20 @@ The following are not fully implemented by this document or the shared types alo
 - Cross-record and workflow-level validation.
 
 These responsibilities should be implemented when the relevant repository, pipeline, and integration contracts are introduced.
+
+
+### Investigation management and coverage migration
+
+The investigation management schemas use the shared types as follows:
+
+| Schema | Shared types applied |
+|---|---|
+| `Investigation` | `Identifier`, `Timestamp`, `ReferenceIds` |
+| `CoverageRecord` | `Identifier`, `Timestamp`, `ReferenceIds` |
+| `Report` | `Identifier`, `Timestamp`, `ReferenceIds` |
+
+Domain-specific validation remains in place, including nonblank descriptive text, paired coverage interval endpoints, interval ordering, the requirement for an examination timestamp when coverage is marked as examined, and nonblank optional notes.
+
+The shared `Identifier` and `ReferenceIds` types normalize surrounding whitespace and reject blank identifiers. Reference lists also reject duplicate identifiers after normalization. The shared `Timestamp` type requires timezone-aware datetime values.
+
+The schemas validate the structure and syntax of references, but they do not verify that referenced records exist in persistent storage. Cross-record existence checks remain the responsibility of a repository or application-service layer.
