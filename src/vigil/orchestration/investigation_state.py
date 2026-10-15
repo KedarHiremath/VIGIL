@@ -83,13 +83,9 @@ class InvestigationState(DomainModel):
 
     @field_validator("started_at", "updated_at", "completed_at")
     @classmethod
-    def validate_timestamps(
-        cls, value: datetime | None
-    ) -> datetime | None:
+    def validate_timestamps(cls, value: datetime | None) -> datetime | None:
         """Require timezone-aware timestamps."""
-        if value is not None and (
-            value.tzinfo is None or value.utcoffset() is None
-        ):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("Investigation timestamps must be timezone-aware.")
         return value
 
@@ -97,23 +93,20 @@ class InvestigationState(DomainModel):
     def validate_state(self) -> "InvestigationState":
         """Ensure investigation status and timestamps are consistent."""
         if (
-            self.status in {
+            self.status
+            in {
                 InvestigationStatus.COMPLETED,
                 InvestigationStatus.FAILED,
             }
             and self.completed_at is None
         ):
-            raise ValueError(
-                "Completed or failed investigations require completed_at."
-            )
+            raise ValueError("Completed or failed investigations require completed_at.")
 
         if (
             self.started_at is not None
             and self.completed_at is not None
             and self.completed_at < self.started_at
         ):
-            raise ValueError(
-                "Completion time cannot precede investigation start time."
-            )
+            raise ValueError("Completion time cannot precede investigation start time.")
 
         return self

@@ -44,9 +44,7 @@ class ErrorDetail(DomainModel):
 
     @field_validator("retry_after_seconds")
     @classmethod
-    def validate_retry_delay(
-        cls, value: float | None
-    ) -> float | None:
+    def validate_retry_delay(cls, value: float | None) -> float | None:
         """Reject non-finite retry delays."""
         if value is not None and not math.isfinite(value):
             raise ValueError("Retry delay must be finite.")
@@ -64,9 +62,7 @@ class ErrorDetail(DomainModel):
     def validate_retry_policy(self) -> "ErrorDetail":
         """Allow retry delays only for retryable errors."""
         if self.retry_after_seconds is not None and not self.retryable:
-            raise ValueError(
-                "A retry delay requires a retryable error."
-            )
+            raise ValueError("A retry delay requires a retryable error.")
         return self
 
 
@@ -81,16 +77,14 @@ class TaskRequest(DomainModel):
     task_type: str = Field(
         min_length=1,
         description=(
-            "Operation to perform, such as frame_sampling "
-            "or visual_analysis."
+            "Operation to perform, such as frame_sampling or visual_analysis."
         ),
     )
 
     input_refs: list[str] = Field(
         default_factory=list,
         description=(
-            "IDs of the media assets, artifacts or other inputs "
-            "required for the task."
+            "IDs of the media assets, artifacts or other inputs required for the task."
         ),
     )
 
@@ -151,8 +145,7 @@ class TaskResult(DomainModel):
     output_refs: list[str] = Field(
         default_factory=list,
         description=(
-            "IDs of outputs produced by the task, such as observations "
-            "or artifacts."
+            "IDs of outputs produced by the task, such as observations or artifacts."
         ),
     )
 
@@ -191,13 +184,9 @@ class TaskResult(DomainModel):
 
     @field_validator("started_at", "completed_at")
     @classmethod
-    def validate_timestamps(
-        cls, value: datetime | None
-    ) -> datetime | None:
+    def validate_timestamps(cls, value: datetime | None) -> datetime | None:
         """Require timezone-aware execution timestamps."""
-        if value is not None and (
-            value.tzinfo is None or value.utcoffset() is None
-        ):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("Execution timestamps must be timezone-aware.")
         return value
 
@@ -236,8 +225,7 @@ class ModelOutput(DomainModel):
     output_type: str = Field(
         min_length=1,
         description=(
-            "Kind of output, such as frame_description, detection "
-            "or transcription."
+            "Kind of output, such as frame_description, detection or transcription."
         ),
     )
 
@@ -249,9 +237,7 @@ class ModelOutput(DomainModel):
         default=None,
         ge=0,
         le=1,
-        description=(
-            "Optional producer-reported confidence score between 0 and 1."
-        ),
+        description=("Optional producer-reported confidence score between 0 and 1."),
     )
 
     artifact_ids: list[str] = Field(
@@ -266,9 +252,7 @@ class ModelOutput(DomainModel):
 
     @field_validator("confidence")
     @classmethod
-    def validate_confidence(
-        cls, value: float | None
-    ) -> float | None:
+    def validate_confidence(cls, value: float | None) -> float | None:
         """Reject non-finite confidence values."""
         if value is not None and not math.isfinite(value):
             raise ValueError("Confidence must be finite.")
