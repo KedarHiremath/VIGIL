@@ -1,0 +1,1 @@
+"""VIGIL domain schemas."""
