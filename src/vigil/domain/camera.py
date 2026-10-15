@@ -1,17 +1,18 @@
 """Camera metadata schema."""
 
+import math
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, field_validator
 
 from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier
 
 
 class Camera(DomainModel):
     """Represents a camera or recording source."""
 
-    camera_id: str = Field(
-        min_length=1,
+    camera_id: Identifier = Field(
         description="Stable unique identifier for this camera.",
     )
 
@@ -56,10 +57,7 @@ class Camera(DomainModel):
     @classmethod
     def validate_clock_offset(cls, value: float | None) -> float | None:
         """Reject infinite and NaN clock offsets."""
-        if value is not None:
-            import math
-
-            if not math.isfinite(value):
-                raise ValueError("Clock offset must be finite.")
+        if value is not None and not math.isfinite(value):
+            raise ValueError("Clock offset must be finite.")
 
         return value
