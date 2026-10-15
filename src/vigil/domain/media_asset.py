@@ -2,19 +2,18 @@
 
 import math
 import re
-from datetime import datetime
 from typing import Literal
 
 from pydantic import Field, field_validator
 
 from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier, Timestamp
 
 
 class MediaAsset(DomainModel):
     """Represents an original video, audio, or image asset."""
 
-    media_asset_id: str = Field(
-        min_length=1,
+    media_asset_id: Identifier = Field(
         description="Stable unique identifier for the original media.",
     )
 
@@ -30,7 +29,7 @@ class MediaAsset(DomainModel):
         ),
     )
 
-    camera_id: str | None = Field(
+    camera_id: Identifier | None = Field(
         default=None,
         description="Optional ID of the camera that produced this media.",
     )
@@ -44,7 +43,7 @@ class MediaAsset(DomainModel):
         ),
     )
 
-    recorded_at: datetime | None = Field(
+    recorded_at: Timestamp | None = Field(
         default=None,
         description=(
             "Optional timezone-aware wall-clock time corresponding "
@@ -74,14 +73,6 @@ class MediaAsset(DomainModel):
         """Reject non-finite durations."""
         if value is not None and not math.isfinite(value):
             raise ValueError("Duration must be finite.")
-        return value
-
-    @field_validator("recorded_at")
-    @classmethod
-    def validate_recorded_at(cls, value: datetime | None) -> datetime | None:
-        """Require a timezone-aware recording timestamp."""
-        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
-            raise ValueError("Recording timestamp must be timezone-aware.")
         return value
 
     @field_validator("sha256")
