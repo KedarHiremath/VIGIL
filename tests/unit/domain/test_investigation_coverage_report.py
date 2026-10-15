@@ -180,16 +180,6 @@ def test_report_rejects_blank_summary() -> None:
         )
 
 
-from datetime import datetime
-
-import pytest
-from pydantic import ValidationError
-
-from vigil.domain.coverage import CoverageRecord, CoverageStatus
-from vigil.domain.investigation import Investigation
-from vigil.domain.report import Report
-
-
 def test_investigation_normalizes_shared_identifiers() -> None:
     investigation = Investigation(
         investigation_id=" inv-001 ",

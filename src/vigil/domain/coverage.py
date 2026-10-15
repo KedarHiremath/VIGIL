@@ -1,4 +1,3 @@
-
 """Domain schema for investigation coverage."""
 
 from enum import Enum

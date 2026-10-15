@@ -1,4 +1,3 @@
-
 """Domain schema for investigation reports."""
 
 from datetime import UTC, datetime
