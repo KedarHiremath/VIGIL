@@ -109,6 +109,7 @@ def test_unexpected_fields_are_rejected() -> None:
             unexpected_field="not_allowed",
         )
 
+
 def test_camera_identifier_uses_shared_contract() -> None:
     camera = Camera(
         camera_id="  cam_001  ",
