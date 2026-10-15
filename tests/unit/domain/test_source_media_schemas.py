@@ -108,3 +108,46 @@ def test_unexpected_fields_are_rejected() -> None:
             name="Parking Entrance",
             unexpected_field="not_allowed",
         )
+
+def test_camera_identifier_uses_shared_contract() -> None:
+    camera = Camera(
+        camera_id="  cam_001  ",
+        name="Parking Entrance",
+    )
+
+    assert camera.camera_id == "cam_001"
+
+
+def test_media_asset_rejects_blank_camera_reference() -> None:
+    with pytest.raises(ValidationError):
+        MediaAsset(
+            media_asset_id="media_001",
+            media_type="video",
+            storage_uri="file:///recording.mp4",
+            camera_id="   ",
+        )
+
+
+def test_source_reference_rejects_blank_media_id() -> None:
+    with pytest.raises(ValidationError):
+        SourceReference(
+            media_asset_id="   ",
+            start_seconds=1.0,
+            end_seconds=2.0,
+        )
+
+
+def test_artifact_uses_shared_identifier_contract() -> None:
+    artifact = Artifact(
+        artifact_id="  artifact_001  ",
+        artifact_type="frame",
+        media_type="image",
+        storage_uri="file:///frame.jpg",
+        source_reference=SourceReference(
+            media_asset_id="media_001",
+            start_seconds=10.0,
+            end_seconds=11.0,
+        ),
+    )
+
+    assert artifact.artifact_id == "artifact_001"
