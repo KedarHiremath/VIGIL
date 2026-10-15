@@ -162,6 +162,25 @@ Domain-specific validation remains in each schema. Examples include IANA timezon
 
 This migration does not verify that a referenced camera or media asset exists in persistent storage. Cross-record existence checks remain the responsibility of a future repository or application-service layer.
 
+### Evidence schema migration
+
+The evidence schemas use the shared types as follows:
+
+| Schema | Shared types applied |
+|---|---|
+| `Provenance` | `Timestamp`, `ReferenceIds` |
+| `Observation` | `Identifier`, `ConfidenceScore`, `ReferenceIds` |
+| `Entity` | `Identifier`, `ReferenceIds` |
+| `Event` | `Identifier`, `Timestamp`, `ReferenceIds` |
+| `EventLink` | `Identifier`, `ConfidenceScore`, `Timestamp` |
+| `EvidenceAssessment` | `Identifier`, `Timestamp` |
+
+Domain-specific validation remains in place, including required supporting observations, event time ordering, distinct endpoints for event links, and finite entity attribute values.
+
+Confidence values use the shared finite range from `0.0` to `1.0`. Reference lists use the shared validation rules for blank and duplicate IDs, while fields requiring at least one reference retain their minimum-length constraints.
+
+The schemas validate the structure and syntax of references, but they do not verify that referenced records exist in persistent storage. Cross-record existence checks remain the responsibility of a repository or application-service layer.
+
 ## 10. Deferred implementation
 
 The following are not fully implemented by this document or the shared types alone:
