@@ -210,3 +210,22 @@ Domain-specific validation remains in place, including nonblank descriptive text
 The shared `Identifier` and `ReferenceIds` types normalize surrounding whitespace and reject blank identifiers. Reference lists also reject duplicate identifiers after normalization. The shared `Timestamp` type requires timezone-aware datetime values.
 
 The schemas validate the structure and syntax of references, but they do not verify that referenced records exist in persistent storage. Cross-record existence checks remain the responsibility of a repository or application-service layer.
+
+
+
+### Execution and orchestration migration
+
+The orchestration schemas use the shared types as follows:
+
+| Schema | Shared types applied |
+|---|---|
+| `InvestigationState` | `Identifier`, `ReferenceIds`, `Timestamp` |
+| `TaskRequest` | `Identifier`, `ReferenceIds`, `Timestamp` |
+| `TaskResult` | `Identifier`, `ReferenceIds`, `Timestamp` |
+| `ModelOutput` | `Identifier`, `ReferenceIds`, `Timestamp`, `ConfidenceScore` |
+
+`ErrorDetail` retains its domain-specific validation for nonblank error text, finite retry delays, and retry-policy consistency.
+
+The task and investigation state schemas retain their lifecycle rules, including required error details for failed tasks, prohibition of errors on completed tasks, terminal investigation timestamps, and chronological ordering of start and completion timestamps.
+
+The shared contracts validate individual values and reference-list structure. They do not execute tasks, manage transitions over time, or verify the existence of referenced records. Those responsibilities belong to the orchestration service, scheduler, or repository layer.

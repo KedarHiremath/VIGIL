@@ -161,3 +161,80 @@ def test_investigation_state_accepts_completed_workflow() -> None:
     )
 
     assert state.status == InvestigationStatus.COMPLETED
+
+
+from datetime import datetime
+
+import pytest
+from pydantic import ValidationError
+
+from vigil.domain.common import ConfidenceScore
+from vigil.orchestration.investigation_state import (
+    InvestigationState,
+    InvestigationStatus,
+)
+from vigil.orchestration.task_types import (
+    ModelOutput,
+    TaskRequest,
+    TaskResult,
+    TaskStatus,
+)
+
+
+def test_investigation_state_normalizes_shared_references() -> None:
+    state = InvestigationState(
+        investigation_id=" inv-001 ",
+        task_ids=[" task-001 "],
+        observation_ids=[" obs-001 "],
+    )
+
+    assert state.investigation_id == "inv-001"
+    assert state.task_ids == ["task-001"]
+    assert state.observation_ids == ["obs-001"]
+
+
+def test_investigation_state_rejects_duplicate_ids_after_normalization() -> None:
+    with pytest.raises(ValidationError):
+        InvestigationState(
+            investigation_id="inv-001",
+            task_ids=["task-001", " task-001 "],
+        )
+
+
+def test_task_request_rejects_naive_creation_timestamp() -> None:
+    with pytest.raises(ValidationError):
+        TaskRequest(
+            task_id="task-001",
+            task_type="frame_sampling",
+            created_at=datetime(2026, 10, 15, 9, 0),
+        )
+
+
+def test_task_result_normalizes_task_id_and_output_references() -> None:
+    result = TaskResult(
+        task_id=" task-001 ",
+        status=TaskStatus.COMPLETED,
+        output_refs=[" obs-001 "],
+    )
+
+    assert result.task_id == "task-001"
+    assert result.output_refs == ["obs-001"]
+
+
+def test_model_output_rejects_non_finite_confidence() -> None:
+    with pytest.raises(ValidationError):
+        ModelOutput(
+            output_id="output-001",
+            producer_name="vision-model",
+            output_type="detection",
+            payload={"label": "person"},
+            confidence=float("nan"),
+        )
+
+
+def test_completed_investigation_requires_completion_timestamp() -> None:
+    with pytest.raises(ValidationError):
+        InvestigationState(
+            investigation_id="inv-001",
+            status=InvestigationStatus.COMPLETED,
+        )
