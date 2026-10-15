@@ -1,4 +1,5 @@
 """Domain schema for investigation coverage."""
+
 from datetime import datetime
 from enum import Enum
 
@@ -46,9 +47,7 @@ class CoverageRecord(DomainModel):
 
     @field_validator("notes")
     @classmethod
-    def reject_blank_notes(
-        cls, value: str | None
-    ) -> str | None:
+    def reject_blank_notes(cls, value: str | None) -> str | None:
         """Reject blank notes when supplied."""
         if value is not None and not value.strip():
             raise ValueError("notes must not be blank")
@@ -56,9 +55,7 @@ class CoverageRecord(DomainModel):
 
     @field_validator("artifact_ids")
     @classmethod
-    def validate_artifact_ids(
-        cls, values: list[str]
-    ) -> list[str]:
+    def validate_artifact_ids(cls, values: list[str]) -> list[str]:
         """Require unique, nonblank artifact IDs."""
         if any(not value.strip() for value in values):
             raise ValueError("Artifact IDs must not be blank")
@@ -76,21 +73,16 @@ class CoverageRecord(DomainModel):
         cls, value: datetime | None
     ) -> datetime | None:
         """Require timezone-aware timestamps when supplied."""
-        if value is not None and (
-            value.tzinfo is None or value.utcoffset() is None
-        ):
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("Timestamps must be timezone-aware")
         return value
 
     @model_validator(mode="after")
     def validate_interval_and_status(self) -> "CoverageRecord":
         """Validate interval order and examination timestamps."""
-        if (self.interval_start is None) != (
-            self.interval_end is None
-        ):
+        if (self.interval_start is None) != (self.interval_end is None):
             raise ValueError(
-                "interval_start and interval_end must be "
-                "provided together"
+                "interval_start and interval_end must be provided together"
             )
 
         if (
@@ -98,16 +90,9 @@ class CoverageRecord(DomainModel):
             and self.interval_end is not None
             and self.interval_end < self.interval_start
         ):
-            raise ValueError(
-                "interval_end must not precede interval_start"
-            )
+            raise ValueError("interval_end must not precede interval_start")
 
-        if (
-            self.status == CoverageStatus.EXAMINED
-            and self.examined_at is None
-        ):
-            raise ValueError(
-                "examined status requires examined_at"
-            )
+        if self.status == CoverageStatus.EXAMINED and self.examined_at is None:
+            raise ValueError("examined status requires examined_at")
 
         return self

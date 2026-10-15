@@ -1,4 +1,5 @@
 """Tests for investigation, coverage, and report schemas."""
+
 from datetime import UTC, datetime
 
 import pytest

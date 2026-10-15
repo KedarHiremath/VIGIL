@@ -1,4 +1,5 @@
 """VIGIL domain schemas."""
+
 from vigil.domain.coverage import CoverageRecord, CoverageStatus
 from vigil.domain.investigation import Investigation
 from vigil.domain.report import Report

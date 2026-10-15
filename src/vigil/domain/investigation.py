@@ -1,4 +1,5 @@
 """Domain schema for an investigation."""
+
 from datetime import UTC, datetime
 
 from pydantic import Field, field_validator
@@ -17,9 +18,7 @@ class Investigation(DomainModel):
     media_asset_ids: list[str] = Field(default_factory=list)
     source_reference_ids: list[str] = Field(default_factory=list)
 
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC)
-    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     created_by: str | None = None
 
     @field_validator(
@@ -38,9 +37,7 @@ class Investigation(DomainModel):
 
     @field_validator("media_asset_ids", "source_reference_ids")
     @classmethod
-    def validate_unique_references(
-        cls, values: list[str]
-    ) -> list[str]:
+    def validate_unique_references(cls, values: list[str]) -> list[str]:
         """Require nonblank and unique reference IDs."""
         if any(not value.strip() for value in values):
             raise ValueError("Reference IDs must not be blank")
@@ -50,9 +47,7 @@ class Investigation(DomainModel):
 
     @field_validator("created_at")
     @classmethod
-    def require_timezone_aware_created_at(
-        cls, value: datetime
-    ) -> datetime:
+    def require_timezone_aware_created_at(cls, value: datetime) -> datetime:
         """Require a timezone-aware creation timestamp."""
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("created_at must be timezone-aware")
