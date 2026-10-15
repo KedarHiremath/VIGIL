@@ -199,6 +199,7 @@ def test_observation_rejects_unknown_fields() -> None:
             unknown_field="not_allowed",
         )
 
+
 def test_observation_identifier_uses_shared_contract() -> None:
     observation = Observation(
         observation_id="  obs-001  ",
