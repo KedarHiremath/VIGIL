@@ -1,4 +1,3 @@
-
 """Runtime state of a VIGIL investigation workflow."""
 
 from datetime import UTC, datetime
@@ -75,9 +74,7 @@ class InvestigationState(DomainModel):
             }
             and self.completed_at is None
         ):
-            raise ValueError(
-                "Completed or failed investigations require completed_at."
-            )
+            raise ValueError("Completed or failed investigations require completed_at.")
 
         if (
             self.started_at is not None

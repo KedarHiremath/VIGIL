@@ -163,24 +163,6 @@ def test_investigation_state_accepts_completed_workflow() -> None:
     assert state.status == InvestigationStatus.COMPLETED
 
 
-from datetime import datetime
-
-import pytest
-from pydantic import ValidationError
-
-from vigil.domain.common import ConfidenceScore
-from vigil.orchestration.investigation_state import (
-    InvestigationState,
-    InvestigationStatus,
-)
-from vigil.orchestration.task_types import (
-    ModelOutput,
-    TaskRequest,
-    TaskResult,
-    TaskStatus,
-)
-
-
 def test_investigation_state_normalizes_shared_references() -> None:
     state = InvestigationState(
         investigation_id=" inv-001 ",

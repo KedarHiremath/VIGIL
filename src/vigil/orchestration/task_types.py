@@ -1,4 +1,3 @@
-
 """Shared task and model-output contracts for VIGIL."""
 
 import math
@@ -195,9 +194,7 @@ class ModelOutput(DomainModel):
 
     confidence: ConfidenceScore | None = Field(
         default=None,
-        description=(
-            "Optional producer-reported confidence score between 0 and 1."
-        ),
+        description=("Optional producer-reported confidence score between 0 and 1."),
     )
 
     artifact_ids: ReferenceIds = Field(
