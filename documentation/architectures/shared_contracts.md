@@ -147,6 +147,21 @@ Shared types are defined in:
 
 New schemas should use these types where their semantics match. Existing schemas should be migrated incrementally, with tests confirming that their intended behavior remains unchanged.
 
+### Initial schema migration: source and media
+
+The source/media schema group uses the shared types as follows:
+
+| Schema | Shared types applied |
+|---|---|
+| `Camera` | `Identifier` for `camera_id` |
+| `MediaAsset` | `Identifier` for `media_asset_id` and optional `camera_id`; `Timestamp` for `recorded_at` |
+| `SourceReference` | `Identifier` for `media_asset_id`; `Timestamp` for `source_timestamp` |
+| `Artifact` | `Identifier` for `artifact_id`; `Timestamp` for `created_at` |
+
+Domain-specific validation remains in each schema. Examples include IANA timezone validation, finite media positions, positive-length intervals, SHA-256 checksums, and artifact/media-type compatibility.
+
+This migration does not verify that a referenced camera or media asset exists in persistent storage. Cross-record existence checks remain the responsibility of a future repository or application-service layer.
+
 ## 10. Deferred implementation
 
 The following are not fully implemented by this document or the shared types alone:
