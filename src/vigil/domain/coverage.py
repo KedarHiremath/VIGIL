@@ -1,11 +1,12 @@
+
 """Domain schema for investigation coverage."""
 
-from datetime import datetime
 from enum import Enum
 
 from pydantic import Field, field_validator, model_validator
 
 from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier, ReferenceIds, Timestamp
 
 
 class CoverageStatus(str, Enum):
@@ -20,30 +21,18 @@ class CoverageStatus(str, Enum):
 class CoverageRecord(DomainModel):
     """Records the examination status of a source or interval."""
 
-    coverage_id: str = Field(min_length=1)
-    investigation_id: str = Field(min_length=1)
-    source_reference_id: str = Field(min_length=1)
+    coverage_id: Identifier = Field(min_length=1)
+    investigation_id: Identifier = Field(min_length=1)
+    source_reference_id: Identifier = Field(min_length=1)
 
     status: CoverageStatus
 
-    interval_start: datetime | None = None
-    interval_end: datetime | None = None
-    examined_at: datetime | None = None
+    interval_start: Timestamp | None = None
+    interval_end: Timestamp | None = None
+    examined_at: Timestamp | None = None
 
     notes: str | None = None
-    artifact_ids: list[str] = Field(default_factory=list)
-
-    @field_validator(
-        "coverage_id",
-        "investigation_id",
-        "source_reference_id",
-    )
-    @classmethod
-    def reject_blank_identifiers(cls, value: str) -> str:
-        """Reject blank identifiers."""
-        if not value.strip():
-            raise ValueError("Identifier must not be blank")
-        return value
+    artifact_ids: ReferenceIds = Field(default_factory=list)
 
     @field_validator("notes")
     @classmethod
@@ -51,30 +40,6 @@ class CoverageRecord(DomainModel):
         """Reject blank notes when supplied."""
         if value is not None and not value.strip():
             raise ValueError("notes must not be blank")
-        return value
-
-    @field_validator("artifact_ids")
-    @classmethod
-    def validate_artifact_ids(cls, values: list[str]) -> list[str]:
-        """Require unique, nonblank artifact IDs."""
-        if any(not value.strip() for value in values):
-            raise ValueError("Artifact IDs must not be blank")
-        if len(values) != len(set(values)):
-            raise ValueError("Artifact IDs must be unique")
-        return values
-
-    @field_validator(
-        "interval_start",
-        "interval_end",
-        "examined_at",
-    )
-    @classmethod
-    def require_timezone_aware_timestamps(
-        cls, value: datetime | None
-    ) -> datetime | None:
-        """Require timezone-aware timestamps when supplied."""
-        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
-            raise ValueError("Timestamps must be timezone-aware")
         return value
 
     @model_validator(mode="after")
