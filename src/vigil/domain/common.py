@@ -9,7 +9,6 @@ from pydantic import (
     StringConstraints,
 )
 
-
 Identifier = Annotated[
     str,
     StringConstraints(
