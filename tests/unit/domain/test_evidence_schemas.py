@@ -198,3 +198,115 @@ def test_observation_rejects_unknown_fields() -> None:
             provenance=make_provenance(),
             unknown_field="not_allowed",
         )
+
+def test_observation_identifier_uses_shared_contract() -> None:
+    observation = Observation(
+        observation_id="  obs-001  ",
+        modality="video",
+        observation_type="person_detection",
+        description="A person entered the frame.",
+        source_references=[
+            SourceReference(
+                media_asset_id="media-001",
+                start_seconds=1.0,
+                end_seconds=2.0,
+            )
+        ],
+        provenance=Provenance(
+            producer_type="vision_model",
+            producer_name="detector",
+            method="person_detection",
+        ),
+    )
+
+    assert observation.observation_id == "obs-001"
+
+
+def test_provenance_rejects_duplicate_references_after_normalization() -> None:
+    with pytest.raises(ValidationError):
+        Provenance(
+            producer_type="vision_model",
+            producer_name="detector",
+            method="person_detection",
+            input_artifact_ids=["artifact-001", " artifact-001 "],
+        )
+
+
+def test_observation_rejects_non_finite_confidence() -> None:
+    with pytest.raises(ValidationError):
+        Observation(
+            observation_id="obs-001",
+            modality="video",
+            observation_type="person_detection",
+            description="A person entered the frame.",
+            source_references=[
+                SourceReference(
+                    media_asset_id="media-001",
+                    start_seconds=1.0,
+                    end_seconds=2.0,
+                )
+            ],
+            confidence=float("nan"),
+            provenance=Provenance(
+                producer_type="vision_model",
+                producer_name="detector",
+                method="person_detection",
+            ),
+        )
+
+
+def test_entity_rejects_duplicate_observation_ids_after_normalization() -> None:
+    with pytest.raises(ValidationError):
+        Entity(
+            entity_id="entity-001",
+            entity_type="person",
+            associated_observation_ids=["obs-001", " obs-001 "],
+        )
+
+
+def test_event_rejects_naive_start_time() -> None:
+    with pytest.raises(ValidationError):
+        Event(
+            event_id="event-001",
+            event_type="entry",
+            description="A person entered the area.",
+            observation_ids=["obs-001"],
+            start_time=datetime(2026, 10, 15, 9, 0),
+        )
+
+
+def test_event_link_normalizes_ids_before_self_link_check() -> None:
+    with pytest.raises(ValidationError):
+        EventLink(
+            event_link_id="link-001",
+            from_event_id="event-001",
+            to_event_id=" event-001 ",
+            relationship_type="related_to",
+            rationale="Testing normalized identifiers.",
+        )
+
+
+def test_event_link_rejects_non_finite_confidence() -> None:
+    with pytest.raises(ValidationError):
+        EventLink(
+            event_link_id="link-001",
+            from_event_id="event-001",
+            to_event_id="event-002",
+            relationship_type="related_to",
+            rationale="Possible relationship.",
+            confidence=float("inf"),
+        )
+
+
+def test_evidence_assessment_normalizes_target_id() -> None:
+    assessment = EvidenceAssessment(
+        assessment_id="assessment-001",
+        target_type="observation",
+        target_id=" obs-001 ",
+        assessment_type="evidence_quality",
+        rating="high",
+        rationale="The source is clear.",
+        assessed_by="reviewer-001",
+    )
+
+    assert assessment.target_id == "obs-001"
