@@ -4,7 +4,7 @@
 
 This document defines conventions that apply across VIGIL domain schemas and execution contracts. Individual schemas must follow these rules rather than independently defining the meaning of identifiers, timestamps, confidence values, references, provenance, and validation.
 
-**Implementation status:** These conventions are the agreed target contract. The shared primitive types are implemented in `src/vigil/domain/common.py`. Existing schemas may still contain local validation logic and should be migrated to the shared types in a controlled pass.
+**Implementation status:** The shared primitive types are implemented in `src/vigil/domain/common.py`. The source/media, evidence, investigation-management, and orchestration schema groups have been migrated to these types, with unit tests covering their validation behavior. Cross-record existence checks, persistence guarantees, and workflow-level state transitions remain responsibilities of later layers.
 
 ## 2. ID conventions
 
