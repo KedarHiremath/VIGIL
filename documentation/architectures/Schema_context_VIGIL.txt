@@ -1,0 +1,1212 @@
+RULES TO READ IT:
+1. "-----------x----------x----------x----------" : Marks the end of a code file
+2. the first line of every code section has the relative path of the code file with respect to root project folder
+-----------x----------x----------x----------
+src\vigil\domain\__init__.py
+"""VIGIL domain schemas."""
+
+from vigil.domain.coverage import CoverageRecord, CoverageStatus
+from vigil.domain.investigation import Investigation
+from vigil.domain.report import Report
+
+__all__ = [
+    # Keep all existing exported names here.
+    "CoverageRecord",
+    "CoverageStatus",
+    "Investigation",
+    "Report",
+]
+-----------x----------x----------x----------
+src\vigil\domain\artifact.py
+"""Derived media artifact schema."""
+
+import re
+from datetime import UTC, datetime
+from typing import Literal
+
+from pydantic import Field, field_validator, model_validator
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier, Timestamp
+from vigil.domain.source_reference import SourceReference
+
+
+class Artifact(DomainModel):
+    """Represents media derived from an original source."""
+
+    artifact_id: Identifier = Field(
+        description="Stable unique identifier for the derived artifact.",
+    )
+
+    artifact_type: Literal[
+        "frame",
+        "crop",
+        "clip",
+        "audio_segment",
+        "derived_media",
+    ] = Field(
+        description="Operation-specific kind of derived media.",
+    )
+
+    media_type: Literal["video", "audio", "image"] = Field(
+        description="Actual media type stored by this artifact.",
+    )
+
+    storage_uri: str = Field(
+        min_length=1,
+        description="Storage location of the derived media.",
+    )
+
+    source_reference: SourceReference = Field(
+        description=(
+            "Original media and timeline interval from which this artifact was derived."
+        ),
+    )
+
+    sha256: str | None = Field(
+        default=None,
+        description=(
+            "Optional SHA-256 checksum of the derived artifact, "
+            "represented by exactly 64 hexadecimal characters."
+        ),
+    )
+
+    created_at: Timestamp = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timezone-aware timestamp when the artifact was created.",
+    )
+
+    @field_validator("storage_uri")
+    @classmethod
+    def validate_storage_uri(cls, value: str) -> str:
+        """Reject blank artifact locations."""
+        if not value.strip():
+            raise ValueError("Storage URI must not be blank.")
+        return value
+
+    @field_validator("sha256")
+    @classmethod
+    def validate_sha256(cls, value: str | None) -> str | None:
+        """Validate the optional SHA-256 checksum."""
+        if value is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+            raise ValueError("SHA-256 must contain 64 hexadecimal characters.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_artifact_type(self) -> "Artifact":
+        """Ensure the artifact kind matches its media type."""
+        expected_types = {
+            "frame": "image",
+            "crop": "image",
+            "clip": "video",
+            "audio_segment": "audio",
+        }
+
+        expected = expected_types.get(self.artifact_type)
+        if expected is not None and self.media_type != expected:
+            raise ValueError(
+                f"Artifact type '{self.artifact_type}' "
+                f"requires media type '{expected}'."
+            )
+
+        return self
+
+-----------x----------x----------x----------
+src\vigil\domain\base.py
+"""Shared validation rules for VIGIL domain schemas."""
+
+from pydantic import BaseModel, ConfigDict
+
+
+class DomainModel(BaseModel):
+    """Base model for validated VIGIL domain objects."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        frozen=True,
+    )
+
+-----------x----------x----------x----------
+src\vigil\domain\camera.py
+"""Camera metadata schema."""
+
+import math
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pydantic import Field, field_validator
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier
+
+
+class Camera(DomainModel):
+    """Represents a camera or recording source."""
+
+    camera_id: Identifier = Field(
+        description="Stable unique identifier for this camera.",
+    )
+
+    name: str = Field(
+        min_length=1,
+        description="Human-readable name assigned to the camera.",
+    )
+
+    location_label: str | None = Field(
+        default=None,
+        description="Optional physical location, such as Parking Entrance.",
+    )
+
+    timezone: str | None = Field(
+        default=None,
+        description="Optional IANA timezone, such as Asia/Kolkata.",
+    )
+
+    clock_offset_seconds: float | None = Field(
+        default=None,
+        description=(
+            "Optional correction in seconds applied to the camera's "
+            "reported clock to estimate reference time."
+        ),
+    )
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str | None) -> str | None:
+        """Reject unknown IANA timezone names."""
+        if value is None:
+            return None
+
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("Unknown IANA timezone.") from exc
+
+        return value
+
+    @field_validator("clock_offset_seconds")
+    @classmethod
+    def validate_clock_offset(cls, value: float | None) -> float | None:
+        """Reject infinite and NaN clock offsets."""
+        if value is not None and not math.isfinite(value):
+            raise ValueError("Clock offset must be finite.")
+
+        return value
+
+-----------x----------x----------x----------
+src\vigil\domain\common.py
+"""Reusable types and validation rules for VIGIL domain schemas."""
+
+from typing import Annotated
+
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    Field,
+    StringConstraints,
+)
+
+Identifier = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+    ),
+]
+"""A nonblank string identifier for a VIGIL object."""
+
+
+Timestamp = AwareDatetime
+"""A datetime that must include timezone information."""
+
+
+ConfidenceScore = Annotated[
+    float,
+    Field(
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    ),
+]
+"""An optional-to-use, normalized confidence score between 0 and 1."""
+
+
+def validate_unique_reference_ids(values: list[str]) -> list[str]:
+    """Reject blank or duplicate identifiers in a reference list."""
+    normalized = [value.strip() for value in values]
+
+    if any(not value for value in normalized):
+        raise ValueError("Reference IDs must not be blank")
+
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("Reference IDs must be unique")
+
+    return normalized
+
+
+ReferenceIds = Annotated[
+    list[Identifier],
+    AfterValidator(validate_unique_reference_ids),
+]
+"""A list of nonblank, unique object reference IDs."""
+
+-----------x----------x----------x----------
+src\vigil\domain\coverage.py
+"""Domain schema for investigation coverage."""
+
+from enum import Enum
+
+from pydantic import Field, field_validator, model_validator
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier, ReferenceIds, Timestamp
+
+
+class CoverageStatus(str, Enum):
+    """Outcome of examining a source or time interval."""
+
+    EXAMINED = "examined"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    NOT_EXAMINED = "not_examined"
+
+
+class CoverageRecord(DomainModel):
+    """Records the examination status of a source or interval."""
+
+    coverage_id: Identifier = Field(min_length=1)
+    investigation_id: Identifier = Field(min_length=1)
+    source_reference_id: Identifier = Field(min_length=1)
+
+    status: CoverageStatus
+
+    interval_start: Timestamp | None = None
+    interval_end: Timestamp | None = None
+    examined_at: Timestamp | None = None
+
+    notes: str | None = None
+    artifact_ids: ReferenceIds = Field(default_factory=list)
+
+    @field_validator("notes")
+    @classmethod
+    def reject_blank_notes(cls, value: str | None) -> str | None:
+        """Reject blank notes when supplied."""
+        if value is not None and not value.strip():
+            raise ValueError("notes must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def validate_interval_and_status(self) -> "CoverageRecord":
+        """Validate interval order and examination timestamps."""
+        if (self.interval_start is None) != (self.interval_end is None):
+            raise ValueError(
+                "interval_start and interval_end must be provided together"
+            )
+
+        if (
+            self.interval_start is not None
+            and self.interval_end is not None
+            and self.interval_end < self.interval_start
+        ):
+            raise ValueError("interval_end must not precede interval_start")
+
+        if self.status == CoverageStatus.EXAMINED and self.examined_at is None:
+            raise ValueError("examined status requires examined_at")
+
+        return self
+
+-----------x----------x----------x----------
+src\vigil\domain\entity.py
+"""Entity schema for detected or tracked objects."""
+
+import math
+from typing import Literal
+
+from pydantic import Field, field_validator
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier, ReferenceIds
+
+
+class Entity(DomainModel):
+    """Represents a detected or tracked entity in an investigation."""
+
+    entity_id: Identifier = Field(
+        description="Stable identifier for this tracked entity.",
+    )
+
+    entity_type: Literal[
+        "person",
+        "vehicle",
+        "animal",
+        "object",
+        "unknown",
+    ] = Field(description="Category assigned to the detected or tracked entity.")
+
+    label: str | None = Field(
+        default=None,
+        description=(
+            "Optional human-readable label; not necessarily a verified identity."
+        ),
+    )
+
+    associated_observation_ids: ReferenceIds = Field(
+        min_length=1,
+        description="IDs of observations associated with this entity.",
+    )
+
+    attributes: dict[str, str | int | float | bool | None] = Field(
+        default_factory=dict,
+        description="Optional structured attributes, such as color or vehicle type.",
+    )
+
+    @field_validator("attributes")
+    @classmethod
+    def validate_attributes(
+        cls,
+        values: dict[str, str | int | float | bool | None],
+    ) -> dict[str, str | int | float | bool | None]:
+        """Reject blank attribute names and non-finite numeric values."""
+        for key, value in values.items():
+            if not key.strip():
+                raise ValueError("Attribute names must not be blank.")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError("Numeric attributes must be finite.")
+        return values
+
+-----------x----------x----------x----------
+src\vigil\domain\event_link.py
+"""Relationship schema between investigation events."""
+
+from datetime import UTC, datetime
+from typing import Literal
+
+from pydantic import Field, model_validator
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import ConfidenceScore, Identifier, Timestamp
+
+
+class EventLink(DomainModel):
+    """Represents a typed relationship between two distinct events."""
+
+    event_link_id: Identifier = Field(
+        description="Stable unique identifier for this relationship.",
+    )
+
+    from_event_id: Identifier = Field(
+        description="ID of the source event in the relationship.",
+    )
+
+    to_event_id: Identifier = Field(
+        description="ID of the destination event in the relationship.",
+    )
+
+    relationship_type: Literal[
+        "before",
+        "after",
+        "overlaps",
+        "related_to",
+        "possible_same_incident",
+    ] = Field(description="Type of relationship between the two events.")
+
+    rationale: str = Field(
+        min_length=1,
+        description="Explanation for recording this relationship.",
+    )
+
+    confidence: ConfidenceScore | None = Field(
+        default=None,
+        description=(
+            "Optional producer-reported confidence score; "
+            "not necessarily a calibrated probability."
+        ),
+    )
+
+    created_at: Timestamp = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timezone-aware time when the relationship was recorded.",
+    )
+
+    @model_validator(mode="after")
+    def validate_distinct_events(self) -> "EventLink":
+        """Prevent an event from being linked to itself."""
+        if self.from_event_id == self.to_event_id:
+            raise ValueError("An event cannot be linked to itself.")
+        return self
+
+-----------x----------x----------x----------
+src\vigil\domain\event.py
+"""Event schema for investigation occurrences."""
+
+from typing import Literal
+
+from pydantic import Field, model_validator
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier, ReferenceIds, Timestamp
+
+
+class Event(DomainModel):
+    """Represents an occurrence supported by investigation evidence."""
+
+    event_id: Identifier = Field(
+        description="Stable unique identifier for this event.",
+    )
+
+    event_type: str = Field(
+        min_length=1,
+        description=(
+            "Category of occurrence, such as restricted_area_entry "
+            "or vehicle_departure."
+        ),
+    )
+
+    description: str = Field(
+        min_length=1,
+        description="Human-readable description of the occurrence.",
+    )
+
+    observation_ids: ReferenceIds = Field(
+        min_length=1,
+        description="Observation IDs supporting this event.",
+    )
+
+    entity_ids: ReferenceIds = Field(
+        default_factory=list,
+        description="Optional entity IDs associated with the event.",
+    )
+
+    status: Literal[
+        "proposed",
+        "under_review",
+        "confirmed",
+        "rejected",
+    ] = Field(default="proposed", description="Current review state of the event.")
+
+    start_time: Timestamp | None = Field(
+        default=None,
+        description="Optional timezone-aware estimated wall-clock start time.",
+    )
+
+    end_time: Timestamp | None = Field(
+        default=None,
+        description="Optional timezone-aware estimated wall-clock end time.",
+    )
+
+    @model_validator(mode="after")
+    def validate_time_order(self) -> "Event":
+        """Reject an end time earlier than the start time."""
+        if (
+            self.start_time is not None
+            and self.end_time is not None
+            and self.end_time < self.start_time
+        ):
+            raise ValueError("Event end time cannot precede start time.")
+        return self
+
+-----------x----------x----------x----------
+src\vigil\domain\evidence_assessment.py
+"""Evidence quality and support assessment schema."""
+
+from datetime import UTC, datetime
+from typing import Literal
+
+from pydantic import Field, field_validator
+
+from vigil.domain.base import DomainModel
+
+
+class EvidenceAssessment(DomainModel):
+    """Records an assessment of evidence supporting an observation or event."""
+
+    assessment_id: str = Field(
+        min_length=1, description="Stable unique identifier for this assessment."
+    )
+
+    target_type: Literal["observation", "event"] = Field(
+        description="Type of record being assessed."
+    )
+
+    target_id: str = Field(
+        min_length=1, description="ID of the observation or event being assessed."
+    )
+
+    assessment_type: Literal[
+        "evidence_quality",
+        "support_level",
+        "uncertainty",
+    ] = Field(description="Dimension of evidence being evaluated.")
+
+    rating: Literal[
+        "insufficient",
+        "low",
+        "moderate",
+        "high",
+    ] = Field(description="Qualitative assessment of the selected dimension.")
+
+    rationale: str = Field(
+        min_length=1, description="Explanation supporting the assessment."
+    )
+
+    assessed_by: str = Field(
+        min_length=1,
+        description="Name or identifier of the assessor or assessment tool.",
+    )
+
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timezone-aware time when the assessment was recorded.",
+    )
+
+    @field_validator("created_at")
+    @classmethod
+    def validate_created_at(cls, value: datetime) -> datetime:
+        """Require a timezone-aware assessment timestamp."""
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Assessment timestamp must be timezone-aware.")
+        return value
+
+-----------x----------x----------x----------
+src\vigil\domain\investigation.py
+"""Domain schema for an investigation."""
+
+from datetime import UTC, datetime
+
+from pydantic import Field, field_validator
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier, ReferenceIds, Timestamp
+
+
+class Investigation(DomainModel):
+    """Defines an investigation and the media within its scope."""
+
+    investigation_id: Identifier = Field(
+        description="Stable identifier for this investigation.",
+    )
+    title: str = Field(min_length=1)
+    objective: str = Field(min_length=1)
+    scope_description: str = Field(min_length=1)
+
+    media_asset_ids: ReferenceIds = Field(default_factory=list)
+    source_reference_ids: ReferenceIds = Field(default_factory=list)
+
+    created_at: Timestamp = Field(default_factory=lambda: datetime.now(UTC))
+    created_by: Identifier | None = None
+
+    @field_validator("title", "objective", "scope_description")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        """Reject blank required text."""
+        if not value.strip():
+            raise ValueError("Value must not be blank")
+        return value
+
+-----------x----------x----------x----------
+src\vigil\domain\media_asset.py
+"""Original media asset schema."""
+
+import math
+import re
+from typing import Literal
+
+from pydantic import Field, field_validator
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier, Timestamp
+
+
+class MediaAsset(DomainModel):
+    """Represents an original video, audio, or image asset."""
+
+    media_asset_id: Identifier = Field(
+        description="Stable unique identifier for the original media.",
+    )
+
+    media_type: Literal["video", "audio", "image"] = Field(
+        description="Type of original media.",
+    )
+
+    storage_uri: str = Field(
+        min_length=1,
+        description=(
+            "Location or storage key for the original media, "
+            "such as a file URI or object-storage URI."
+        ),
+    )
+
+    camera_id: Identifier | None = Field(
+        default=None,
+        description="Optional ID of the camera that produced this media.",
+    )
+
+    duration_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional media duration in seconds; omit when unknown "
+            "or not applicable, such as for a still image."
+        ),
+    )
+
+    recorded_at: Timestamp | None = Field(
+        default=None,
+        description=(
+            "Optional timezone-aware wall-clock time corresponding "
+            "to the beginning of the recording."
+        ),
+    )
+
+    sha256: str | None = Field(
+        default=None,
+        description=(
+            "Optional SHA-256 checksum of the original media, "
+            "represented by exactly 64 hexadecimal characters."
+        ),
+    )
+
+    @field_validator("storage_uri")
+    @classmethod
+    def validate_storage_uri(cls, value: str) -> str:
+        """Reject blank storage references."""
+        if not value.strip():
+            raise ValueError("Storage URI must not be blank.")
+        return value
+
+    @field_validator("duration_seconds")
+    @classmethod
+    def validate_duration(cls, value: float | None) -> float | None:
+        """Reject non-finite durations."""
+        if value is not None and not math.isfinite(value):
+            raise ValueError("Duration must be finite.")
+        return value
+
+    @field_validator("sha256")
+    @classmethod
+    def validate_sha256(cls, value: str | None) -> str | None:
+        """Validate the optional SHA-256 checksum."""
+        if value is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+            raise ValueError("SHA-256 must contain 64 hexadecimal characters.")
+        return value
+
+-----------x----------x----------x----------
+src\vigil\domain\observation.py
+"""Observation schema for media-analysis findings."""
+
+from typing import Literal
+
+from pydantic import Field
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import ConfidenceScore, Identifier, ReferenceIds
+from vigil.domain.provenance import Provenance
+from vigil.domain.source_reference import SourceReference
+
+
+class Observation(DomainModel):
+    """Represents a finding produced by analyzing source media."""
+
+    observation_id: Identifier = Field(
+        description="Stable unique identifier for this observation.",
+    )
+
+    modality: Literal["video", "audio", "image"] = Field(
+        description="Media modality from which the finding was derived.",
+    )
+
+    observation_type: str = Field(
+        min_length=1,
+        description=(
+            "Kind of finding, such as person_detection, motion, "
+            "action, or audio_transcription."
+        ),
+    )
+
+    description: str = Field(
+        min_length=1,
+        description="Human-readable description of the finding.",
+    )
+
+    source_references: list[SourceReference] = Field(
+        min_length=1,
+        description="One or more source-media intervals supporting the observation.",
+    )
+
+    artifact_ids: ReferenceIds = Field(
+        default_factory=list,
+        description="IDs of derived artifacts associated with the finding.",
+    )
+
+    confidence: ConfidenceScore | None = Field(
+        default=None,
+        description=(
+            "Optional producer-reported confidence score between 0 and 1; "
+            "not necessarily a calibrated probability."
+        ),
+    )
+
+    provenance: Provenance = Field(
+        description="Record of how this observation was produced.",
+    )
+
+-----------x----------x----------x----------
+src\vigil\domain\provenance.py
+"""Provenance schema for traceable analysis results."""
+
+from datetime import UTC, datetime
+from typing import Literal
+
+from pydantic import Field
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import ReferenceIds, Timestamp
+
+
+class Provenance(DomainModel):
+    """Records how an observation or derived result was produced."""
+
+    producer_type: Literal[
+        "vision_model",
+        "audio_model",
+        "rule",
+        "agent",
+        "human",
+        "other",
+    ] = Field(description="Category of the component or person producing the result.")
+
+    producer_name: str = Field(
+        min_length=1,
+        description="Name of the model, tool, rule, agent, or person.",
+    )
+
+    producer_version: str | None = Field(
+        default=None,
+        description="Optional version of the producing component.",
+    )
+
+    method: str = Field(
+        min_length=1,
+        description="Analysis method or operation used to produce the result.",
+    )
+
+    input_artifact_ids: ReferenceIds = Field(
+        default_factory=list,
+        description="IDs of derived media artifacts consumed during analysis.",
+    )
+
+    parent_observation_ids: ReferenceIds = Field(
+        default_factory=list,
+        description=(
+            "IDs of earlier observations used to derive or refine this result."
+        ),
+    )
+
+    created_at: Timestamp = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timezone-aware timestamp when the result was produced.",
+    )
+
+-----------x----------x----------x----------
+src\vigil\domain\report.py
+"""Domain schema for investigation reports."""
+
+from datetime import UTC, datetime
+
+from pydantic import Field, field_validator
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier, ReferenceIds, Timestamp
+
+
+class Report(DomainModel):
+    """Structured findings with references to supporting evidence."""
+
+    report_id: Identifier = Field(min_length=1)
+    investigation_id: Identifier = Field(min_length=1)
+    title: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+
+    observation_ids: ReferenceIds = Field(default_factory=list)
+    event_ids: ReferenceIds = Field(default_factory=list)
+    assessment_ids: ReferenceIds = Field(default_factory=list)
+    coverage_ids: ReferenceIds = Field(default_factory=list)
+
+    generated_at: Timestamp = Field(default_factory=lambda: datetime.now(UTC))
+    generated_by: str = Field(min_length=1)
+
+    @field_validator("title", "summary", "generated_by")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        """Reject blank required text fields."""
+        if not value.strip():
+            raise ValueError("Value must not be blank")
+        return value
+
+-----------x----------x----------x----------
+src\vigil\domain\source_reference.py
+"""Source evidence reference schema."""
+
+import math
+
+from pydantic import Field, field_validator, model_validator
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier, Timestamp
+
+
+class SourceReference(DomainModel):
+    """Identifies a precise interval in an original media asset."""
+
+    media_asset_id: Identifier = Field(
+        description="ID of the original media containing the evidence.",
+    )
+
+    start_seconds: float = Field(
+        ge=0,
+        description=(
+            "Inclusive start position in seconds on the original media timeline."
+        ),
+    )
+
+    end_seconds: float = Field(
+        gt=0,
+        description=(
+            "Exclusive end position in seconds on the original media timeline."
+        ),
+    )
+
+    source_timestamp: Timestamp | None = Field(
+        default=None,
+        description=(
+            "Optional timezone-aware wall-clock timestamp corresponding "
+            "to start_seconds; retain its timezone or normalize to UTC."
+        ),
+    )
+
+    @field_validator("start_seconds", "end_seconds")
+    @classmethod
+    def validate_finite_time(cls, value: float) -> float:
+        """Reject NaN and infinite timeline positions."""
+        if not math.isfinite(value):
+            raise ValueError("Timeline positions must be finite.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> "SourceReference":
+        """Require a positive-length half-open interval."""
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("End time must be greater than start time.")
+        return self
+
+-----------x----------x----------x----------
+src\vigil\orchestration\__init__.py
+"""VIGIL task execution and orchestration contracts."""
+
+-----------x----------x----------x----------
+src\vigil\orchestration\investigation_state.py
+"""Runtime state of a VIGIL investigation workflow."""
+
+from datetime import UTC, datetime
+from enum import Enum
+
+from pydantic import Field, model_validator
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import Identifier, ReferenceIds, Timestamp
+
+
+class InvestigationStatus(str, Enum):
+    """Lifecycle status of an investigation workflow."""
+
+    CREATED = "created"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class InvestigationState(DomainModel):
+    """Tracks progress and outputs of an investigation workflow."""
+
+    investigation_id: Identifier = Field(
+        description="Stable identifier for the investigation.",
+    )
+
+    status: InvestigationStatus = Field(
+        default=InvestigationStatus.CREATED,
+        description="Current lifecycle status of the investigation.",
+    )
+
+    task_ids: ReferenceIds = Field(
+        default_factory=list,
+        description="IDs of tasks associated with this investigation.",
+    )
+
+    observation_ids: ReferenceIds = Field(
+        default_factory=list,
+        description="IDs of observations produced during the investigation.",
+    )
+
+    event_ids: ReferenceIds = Field(
+        default_factory=list,
+        description="IDs of events identified during the investigation.",
+    )
+
+    started_at: Timestamp | None = Field(
+        default=None,
+        description="Optional timezone-aware time when the investigation began.",
+    )
+
+    updated_at: Timestamp = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timezone-aware time when the state was last updated.",
+    )
+
+    completed_at: Timestamp | None = Field(
+        default=None,
+        description=(
+            "Timezone-aware time when the investigation reached a terminal state."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_state(self) -> "InvestigationState":
+        """Ensure investigation status and timestamps are consistent."""
+        if (
+            self.status
+            in {
+                InvestigationStatus.COMPLETED,
+                InvestigationStatus.FAILED,
+            }
+            and self.completed_at is None
+        ):
+            raise ValueError("Completed or failed investigations require completed_at.")
+
+        if (
+            self.started_at is not None
+            and self.completed_at is not None
+            and self.completed_at < self.started_at
+        ):
+            raise ValueError("Completion time cannot precede investigation start time.")
+
+        return self
+
+-----------x----------x----------x----------
+src\vigil\orchestration\task_types.py
+"""Shared task and model-output contracts for VIGIL."""
+
+import math
+from datetime import UTC, datetime
+from enum import Enum
+
+from pydantic import Field, JsonValue, field_validator, model_validator
+
+from vigil.domain.base import DomainModel
+from vigil.domain.common import (
+    ConfidenceScore,
+    Identifier,
+    ReferenceIds,
+    Timestamp,
+)
+
+
+class TaskStatus(str, Enum):
+    """Lifecycle status of an execution task."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+class ErrorDetail(DomainModel):
+    """Structured information describing an execution error."""
+
+    code: str = Field(
+        min_length=1,
+        description="Stable machine-readable error code.",
+    )
+
+    message: str = Field(
+        min_length=1,
+        description="Human-readable explanation of the error.",
+    )
+
+    retryable: bool = Field(
+        description="Whether retrying the operation may succeed.",
+    )
+
+    retry_after_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description="Optional minimum delay before retrying, in seconds.",
+    )
+
+    @field_validator("retry_after_seconds")
+    @classmethod
+    def validate_retry_delay(cls, value: float | None) -> float | None:
+        """Reject non-finite retry delays."""
+        if value is not None and not math.isfinite(value):
+            raise ValueError("Retry delay must be finite.")
+        return value
+
+    @field_validator("code", "message")
+    @classmethod
+    def validate_nonblank_text(cls, value: str) -> str:
+        """Reject blank error codes and messages."""
+        if not value.strip():
+            raise ValueError("Error text must not be blank.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_retry_policy(self) -> "ErrorDetail":
+        """Allow retry delays only for retryable errors."""
+        if self.retry_after_seconds is not None and not self.retryable:
+            raise ValueError("A retry delay requires a retryable error.")
+        return self
+
+
+class TaskRequest(DomainModel):
+    """Defines a request for a tool or agent to perform work."""
+
+    task_id: Identifier = Field(
+        description="Stable unique identifier for this task.",
+    )
+
+    task_type: str = Field(
+        min_length=1,
+        description=(
+            "Operation to perform, such as frame_sampling or visual_analysis."
+        ),
+    )
+
+    input_refs: ReferenceIds = Field(
+        default_factory=list,
+        description=(
+            "IDs of the media assets, artifacts or other inputs required for the task."
+        ),
+    )
+
+    parameters: dict[str, JsonValue] = Field(
+        default_factory=dict,
+        description="JSON-compatible parameters controlling the operation.",
+    )
+
+    requested_by: Identifier | None = Field(
+        default=None,
+        description="Optional identifier of the agent or component requesting work.",
+    )
+
+    created_at: Timestamp = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timezone-aware time when the task request was created.",
+    )
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_task_type(cls, value: str) -> str:
+        """Reject blank task types."""
+        if not value.strip():
+            raise ValueError("Task type must not be blank.")
+        return value
+
+
+class TaskResult(DomainModel):
+    """Records the execution outcome of a task."""
+
+    task_id: Identifier = Field(
+        description="ID of the task whose execution produced this result.",
+    )
+
+    status: TaskStatus = Field(
+        description="Current execution outcome or lifecycle status.",
+    )
+
+    output_refs: ReferenceIds = Field(
+        default_factory=list,
+        description=(
+            "IDs of outputs produced by the task, such as observations or artifacts."
+        ),
+    )
+
+    error: ErrorDetail | None = Field(
+        default=None,
+        description="Structured failure or partial-execution details, if any.",
+    )
+
+    started_at: Timestamp | None = Field(
+        default=None,
+        description="Optional timezone-aware time when execution began.",
+    )
+
+    completed_at: Timestamp | None = Field(
+        default=None,
+        description="Optional timezone-aware time when execution ended.",
+    )
+
+    @model_validator(mode="after")
+    def validate_result(self) -> "TaskResult":
+        """Keep task status, errors and timestamps consistent."""
+        if self.status == TaskStatus.FAILED and self.error is None:
+            raise ValueError("A failed task must include error details.")
+
+        if self.status == TaskStatus.COMPLETED and self.error is not None:
+            raise ValueError("A completed task must not include an error.")
+
+        if (
+            self.started_at is not None
+            and self.completed_at is not None
+            and self.completed_at < self.started_at
+        ):
+            raise ValueError("Completion time cannot precede start time.")
+
+        return self
+
+
+class ModelOutput(DomainModel):
+    """Represents structured output from a model or analysis tool."""
+
+    output_id: Identifier = Field(
+        description="Stable unique identifier for this output.",
+    )
+
+    producer_name: str = Field(
+        min_length=1,
+        description="Name of the model or analysis tool producing the output.",
+    )
+
+    output_type: str = Field(
+        min_length=1,
+        description=(
+            "Kind of output, such as frame_description, detection or transcription."
+        ),
+    )
+
+    payload: dict[str, JsonValue] = Field(
+        description="JSON-compatible structured output produced by the tool.",
+    )
+
+    confidence: ConfidenceScore | None = Field(
+        default=None,
+        description=("Optional producer-reported confidence score between 0 and 1."),
+    )
+
+    artifact_ids: ReferenceIds = Field(
+        default_factory=list,
+        description="IDs of artifacts associated with the output.",
+    )
+
+    created_at: Timestamp = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timezone-aware time when the output was created.",
+    )
+
+-----------x----------x----------x----------
+src\vigil\__init__.py
+def main() -> None:
+    print("Hello from vigil!")
+
+-----------x----------x----------x----------
