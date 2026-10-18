@@ -29,6 +29,10 @@ class TaskResultContractError(ExecutorError):
     """Raised when a worker violates the result contract."""
 
 
+class WorkerExecutionError(ExecutorError):
+    """Raised when a worker encounters an expected execution failure."""
+
+
 class TaskExecutor:
     """Route task requests to registered workers."""
 

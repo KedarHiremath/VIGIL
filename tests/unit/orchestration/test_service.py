@@ -6,6 +6,7 @@ from vigil.orchestration.executor import (
     TaskExecutor,
     TaskResultContractError,
     UnknownTaskTypeError,
+    WorkerExecutionError,
 )
 from vigil.orchestration.investigation_state import (
     InvestigationState,
@@ -79,10 +80,10 @@ class FakeWorker:
 
 
 class RaisingWorker:
-    """Worker simulating an unexpected execution exception."""
+    """Worker simulating a reported execution failure."""
 
     def execute(self, request: TaskRequest) -> TaskResult:
-        raise RuntimeError("Simulated internal worker error")
+        raise WorkerExecutionError("Simulated worker execution failure")
 
 
 def make_service(worker: object) -> OrchestrationService:
@@ -92,7 +93,7 @@ def make_service(worker: object) -> OrchestrationService:
     return OrchestrationService(executor)
 
 
-def test_completed_task_completes_investigation() -> None:
+def test_task_completion_does_not_finish_investigation() -> None:
     worker = FakeWorker(make_result())
     service = make_service(worker)
     original = make_state()
@@ -100,10 +101,17 @@ def test_completed_task_completes_investigation() -> None:
     outcome = service.execute_task(original, make_request())
 
     assert outcome.task_result.status == TaskStatus.COMPLETED
-    assert outcome.state.status == InvestigationStatus.COMPLETED
+    assert outcome.state.status == InvestigationStatus.RUNNING
     assert outcome.state.task_ids == ["task-001"]
     assert outcome.state.started_at is not None
-    assert outcome.state.completed_at is not None
+    assert outcome.state.completed_at is None
+
+    completed_state = service.complete_investigation(outcome.state)
+
+    assert completed_state.status == InvestigationStatus.COMPLETED
+    assert completed_state.completed_at is not None
+
+    # The original immutable state must remain unchanged.
     assert original.status == InvestigationStatus.CREATED
     assert original.task_ids == []
     assert worker.calls == 1
@@ -134,7 +142,7 @@ def test_failed_task_fails_investigation() -> None:
     assert outcome.state.completed_at is not None
 
 
-def test_unexpected_worker_exception_becomes_failed_result() -> None:
+def test_worker_execution_error_becomes_failed_result() -> None:
     service = make_service(RaisingWorker())
 
     outcome = service.execute_task(make_state(), make_request())
@@ -173,15 +181,38 @@ def test_duplicate_task_id_is_rejected_before_execution() -> None:
     assert worker.calls == 0
 
 
-def test_non_created_investigation_is_rejected() -> None:
+def test_paused_investigation_is_rejected() -> None:
     worker = FakeWorker(make_result())
     service = make_service(worker)
+
     running_state = transition_state(
         make_state(),
         InvestigationStatus.RUNNING,
     )
+    paused_state = transition_state(
+        running_state,
+        InvestigationStatus.PAUSED,
+    )
 
     with pytest.raises(InvalidInvestigationStateError):
-        service.execute_task(running_state, make_request())
+        service.execute_task(paused_state, make_request())
 
     assert worker.calls == 0
+
+
+def test_unexpected_programming_error_propagates() -> None:
+    class BuggyWorker:
+        def execute(self, request: TaskRequest) -> TaskResult:
+            raise RuntimeError("Unexpected programming error")
+
+    service = make_service(BuggyWorker())
+
+    with pytest.raises(RuntimeError, match="Unexpected programming error"):
+        service.execute_task(make_state(), make_request())
+
+
+def test_complete_investigation_rejects_created_state() -> None:
+    service = make_service(FakeWorker(make_result()))
+
+    with pytest.raises(InvalidInvestigationStateError):
+        service.complete_investigation(make_state())

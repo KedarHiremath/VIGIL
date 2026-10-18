@@ -7,6 +7,7 @@ from vigil.orchestration.executor import (
     TaskExecutor,
     TaskResultContractError,
     UnknownTaskTypeError,
+    WorkerExecutionError,
 )
 from vigil.orchestration.investigation_state import (
     InvestigationState,
@@ -55,9 +56,12 @@ class OrchestrationService:
         request: TaskRequest,
     ) -> TaskExecutionOutcome:
         """Execute one task and return its result and updated state."""
-        if state.status != InvestigationStatus.CREATED:
+        if state.status not in {
+            InvestigationStatus.CREATED,
+            InvestigationStatus.RUNNING,
+        }:
             raise InvalidInvestigationStateError(
-                "A new task can only start from a CREATED investigation."
+                "Tasks can only run in CREATED or RUNNING investigations."
             )
 
         if request.task_id in state.task_ids:
@@ -66,18 +70,22 @@ class OrchestrationService:
             )
 
         started_at = datetime.now(UTC)
-        running_state = transition_state(
-            state,
-            InvestigationStatus.RUNNING,
-        )
+
+        if state.status == InvestigationStatus.CREATED:
+            running_state = transition_state(
+                state,
+                InvestigationStatus.RUNNING,
+            )
+        else:
+            running_state = state
 
         try:
             task_result = self._executor.execute(request)
         except (UnknownTaskTypeError, TaskResultContractError):
-            # Configuration and contract violations are not task failures.
+            # Configuration and contract violations must remain visible.
             raise
-        except Exception:
-            # Convert unexpected worker exceptions into the existing contract.
+        except WorkerExecutionError:
+            # Convert an explicitly reported worker failure into TaskResult.
             finished_at = datetime.now(UTC)
             task_result = TaskResult(
                 task_id=request.task_id,
@@ -85,7 +93,7 @@ class OrchestrationService:
                 output_refs=[],
                 error=ErrorDetail(
                     code="WORKER_EXECUTION_ERROR",
-                    message="The worker raised an unexpected exception.",
+                    message="The worker reported an execution failure.",
                     retryable=False,
                 ),
                 started_at=started_at,
@@ -103,22 +111,31 @@ class OrchestrationService:
             }
         )
 
-        if task_result.status == TaskStatus.COMPLETED:
-            updated_state = transition_state(
-                state_after_execution,
-                InvestigationStatus.COMPLETED,
-            )
-        elif task_result.status == TaskStatus.FAILED:
+        if task_result.status == TaskStatus.FAILED:
             updated_state = transition_state(
                 state_after_execution,
                 InvestigationStatus.FAILED,
             )
         else:
-            # PARTIAL means this task finished partially, not that the
-            # overall investigation has completed.
+            # A completed or partial task does not complete the investigation.
             updated_state = state_after_execution
 
         return TaskExecutionOutcome(
             state=updated_state,
             task_result=task_result,
+        )
+
+    def complete_investigation(
+        self,
+        state: InvestigationState,
+    ) -> InvestigationState:
+        """Mark a running investigation as completed."""
+        if state.status != InvestigationStatus.RUNNING:
+            raise InvalidInvestigationStateError(
+                "Only a RUNNING investigation can be completed."
+            )
+
+        return transition_state(
+            state,
+            InvestigationStatus.COMPLETED,
         )
