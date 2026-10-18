@@ -1204,3 +1204,302 @@ def main() -> None:
     print("Hello from vigil!")
 
 -----------x----------x----------x----------
+src\vigil\orchestration\executor.py
+"""Synchronous task execution and worker routing."""
+
+from typing import Protocol
+
+from vigil.orchestration.task_types import (
+    TaskRequest,
+    TaskResult,
+    TaskStatus,
+)
+
+
+class TaskWorker(Protocol):
+    """Contract for an object capable of executing a task."""
+
+    def execute(self, request: TaskRequest) -> TaskResult:
+        """Execute a task and return its result."""
+        ...
+
+
+class ExecutorError(Exception):
+    """Base exception for executor errors."""
+
+
+class UnknownTaskTypeError(ExecutorError):
+    """Raised when no worker is registered for a task type."""
+
+
+class TaskResultContractError(ExecutorError):
+    """Raised when a worker violates the result contract."""
+
+
+class WorkerExecutionError(ExecutorError):
+    """Raised when a worker encounters an expected execution failure."""
+
+
+class TaskExecutor:
+    """Route task requests to registered workers."""
+
+    def __init__(self) -> None:
+        self._workers: dict[str, TaskWorker] = {}
+
+    def register(self, task_type: str, worker: TaskWorker) -> None:
+        """Register one worker for a task type."""
+        normalized_type = task_type.strip()
+
+        if not normalized_type:
+            raise ValueError("task_type must not be blank")
+
+        if normalized_type in self._workers:
+            raise ValueError(
+                f"A worker is already registered for task type '{normalized_type}'"
+            )
+
+        self._workers[normalized_type] = worker
+
+    def execute(self, request: TaskRequest) -> TaskResult:
+        """Execute a request using its registered worker."""
+        worker = self._workers.get(request.task_type)
+
+        if worker is None:
+            raise UnknownTaskTypeError(
+                f"No worker registered for task type '{request.task_type}'"
+            )
+
+        result = worker.execute(request)
+
+        if not isinstance(result, TaskResult):
+            raise TaskResultContractError("Worker must return a TaskResult")
+
+        if result.task_id != request.task_id:
+            raise TaskResultContractError(
+                "Worker result task_id must match request task_id"
+            )
+
+        if result.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+            raise TaskResultContractError(
+                "Synchronous workers must return a final task status"
+            )
+
+        return result
+
+-----------x----------x----------x----------
+src\vigil\orchestration\service.py
+"""Service coordinating task execution and investigation state."""
+
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
+from vigil.orchestration.executor import (
+    TaskExecutor,
+    TaskResultContractError,
+    UnknownTaskTypeError,
+    WorkerExecutionError,
+)
+from vigil.orchestration.investigation_state import (
+    InvestigationState,
+    InvestigationStatus,
+)
+from vigil.orchestration.task_types import (
+    ErrorDetail,
+    TaskRequest,
+    TaskResult,
+    TaskStatus,
+)
+from vigil.orchestration.transitions import (
+    transition_state,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskExecutionOutcome:
+    """Outcome of executing one task within an investigation."""
+
+    state: InvestigationState
+    task_result: TaskResult
+
+
+class OrchestrationServiceError(RuntimeError):
+    """Base exception for orchestration service errors."""
+
+
+class InvalidInvestigationStateError(OrchestrationServiceError):
+    """Raised when the investigation cannot accept a new task."""
+
+
+class DuplicateTaskError(OrchestrationServiceError):
+    """Raised when a task ID already exists in the investigation state."""
+
+
+class OrchestrationService:
+    """Coordinate one synchronous task execution."""
+
+    def __init__(self, executor: TaskExecutor) -> None:
+        self._executor = executor
+
+    def execute_task(
+        self,
+        state: InvestigationState,
+        request: TaskRequest,
+    ) -> TaskExecutionOutcome:
+        """Execute one task and return its result and updated state."""
+        if state.status not in {
+            InvestigationStatus.CREATED,
+            InvestigationStatus.RUNNING,
+        }:
+            raise InvalidInvestigationStateError(
+                "Tasks can only run in CREATED or RUNNING investigations."
+            )
+
+        if request.task_id in state.task_ids:
+            raise DuplicateTaskError(
+                f"Task '{request.task_id}' is already recorded in this investigation."
+            )
+
+        started_at = datetime.now(UTC)
+
+        if state.status == InvestigationStatus.CREATED:
+            running_state = transition_state(
+                state,
+                InvestigationStatus.RUNNING,
+            )
+        else:
+            running_state = state
+
+        try:
+            task_result = self._executor.execute(request)
+        except (UnknownTaskTypeError, TaskResultContractError):
+            # Configuration and contract violations must remain visible.
+            raise
+        except WorkerExecutionError:
+            # Convert an explicitly reported worker failure into TaskResult.
+            finished_at = datetime.now(UTC)
+            task_result = TaskResult(
+                task_id=request.task_id,
+                status=TaskStatus.FAILED,
+                output_refs=[],
+                error=ErrorDetail(
+                    code="WORKER_EXECUTION_ERROR",
+                    message="The worker reported an execution failure.",
+                    retryable=False,
+                ),
+                started_at=started_at,
+                completed_at=finished_at,
+            )
+
+        finished_at = datetime.now(UTC)
+
+        # Add the task ID to a new immutable state.
+        state_after_execution = InvestigationState.model_validate(
+            running_state.model_dump()
+            | {
+                "task_ids": [*running_state.task_ids, request.task_id],
+                "updated_at": finished_at,
+            }
+        )
+
+        if task_result.status == TaskStatus.FAILED:
+            updated_state = transition_state(
+                state_after_execution,
+                InvestigationStatus.FAILED,
+            )
+        else:
+            # A completed or partial task does not complete the investigation.
+            updated_state = state_after_execution
+
+        return TaskExecutionOutcome(
+            state=updated_state,
+            task_result=task_result,
+        )
+
+    def complete_investigation(
+        self,
+        state: InvestigationState,
+    ) -> InvestigationState:
+        """Mark a running investigation as completed."""
+        if state.status != InvestigationStatus.RUNNING:
+            raise InvalidInvestigationStateError(
+                "Only a RUNNING investigation can be completed."
+            )
+
+        return transition_state(
+            state,
+            InvestigationStatus.COMPLETED,
+        )
+
+-----------x----------x----------x----------
+src\vigil\orchestration\transitions.py
+"""Lifecycle transitions for investigation state."""
+
+from datetime import UTC, datetime
+
+from vigil.orchestration.investigation_state import (
+    InvestigationState,
+    InvestigationStatus,
+)
+
+
+class InvalidStateTransitionError(ValueError):
+    """Raised when an investigation transition is not allowed."""
+
+
+_ALLOWED_TRANSITIONS: dict[InvestigationStatus, frozenset[InvestigationStatus]] = {
+    InvestigationStatus.CREATED: frozenset(
+        {
+            InvestigationStatus.RUNNING,
+            InvestigationStatus.FAILED,
+        }
+    ),
+    InvestigationStatus.RUNNING: frozenset(
+        {
+            InvestigationStatus.PAUSED,
+            InvestigationStatus.COMPLETED,
+            InvestigationStatus.FAILED,
+        }
+    ),
+    InvestigationStatus.PAUSED: frozenset(
+        {
+            InvestigationStatus.RUNNING,
+            InvestigationStatus.FAILED,
+        }
+    ),
+    InvestigationStatus.COMPLETED: frozenset(),
+    InvestigationStatus.FAILED: frozenset(),
+}
+
+
+def transition_state(
+    state: InvestigationState,
+    new_status: InvestigationStatus,
+) -> InvestigationState:
+    """Return a new state with a validated lifecycle transition."""
+    if new_status not in _ALLOWED_TRANSITIONS[state.status]:
+        raise InvalidStateTransitionError(
+            f"Cannot transition investigation from "
+            f"'{state.status.value}' to '{new_status.value}'."
+        )
+
+    now = datetime.now(UTC)
+
+    updates: dict[str, object] = {
+        "status": new_status,
+        "updated_at": now,
+    }
+
+    if new_status == InvestigationStatus.RUNNING and state.started_at is None:
+        updates["started_at"] = now
+
+    if new_status in {
+        InvestigationStatus.COMPLETED,
+        InvestigationStatus.FAILED,
+    }:
+        updates["completed_at"] = now
+
+    # Revalidate through Pydantic instead of using model_copy(update=...),
+    # which does not validate updated values by default.
+    return InvestigationState.model_validate(state.model_dump() | updates)
+
+-----------x----------x----------x----------
