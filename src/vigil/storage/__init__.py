@@ -5,9 +5,11 @@ from vigil.storage.repository import (
     InvestigationRepository,
     ReferentialIntegrityError,
 )
+from vigil.storage.sqlite_repository import SqliteInvestigationRepository
 
 __all__ = [
     "EntityNotFoundError",
     "InvestigationRepository",
     "ReferentialIntegrityError",
+    "SqliteInvestigationRepository",
 ]

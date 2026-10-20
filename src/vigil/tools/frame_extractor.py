@@ -1,11 +1,32 @@
 """Tool worker for media frame extraction and interval sampling."""
 
+from __future__ import annotations
+
+import tempfile
 import uuid
+from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from vigil.domain.artifact import Artifact
 from vigil.domain.source_reference import SourceReference
+from vigil.media.decoder import MediaDecoder
 from vigil.orchestration.task_types import TaskRequest
 from vigil.tools.base import BaseToolWorker, generate_sha256
+
+
+def uri_to_file_path(uri: str) -> Path | None:
+    """Resolve a file URI or path string to a local filesystem Path if it exists."""
+    if uri.startswith("file://"):
+        parsed = urlparse(uri)
+        path = url2pathname(parsed.path)
+        if path.startswith("\\") and len(path) > 3 and path[2] == ":":
+            path = path[1:]
+        p = Path(path)
+        return p if p.is_file() else None
+
+    p = Path(uri)
+    return p if p.is_file() else None
 
 
 class FrameExtractorWorker(BaseToolWorker):
@@ -39,6 +60,47 @@ class FrameExtractorWorker(BaseToolWorker):
             end_t = float(request.parameters.get("end_seconds", duration))
             end_t = min(end_t, duration)
 
+            # Check if physical video file exists
+            physical_file = uri_to_file_path(media_asset.storage_uri)
+
+            if physical_file is not None and physical_file.is_file():
+                # Extract real frames using MediaDecoder
+                art_dir = Path(tempfile.gettempdir()) / "vigil_artifacts" / media_id / "frames"
+                extracted_frames = MediaDecoder.extract_frames(
+                    file_path=physical_file,
+                    output_dir=art_dir,
+                    sample_interval_seconds=sample_interval,
+                    start_seconds=start_t,
+                    end_seconds=end_t,
+                    max_frames=max_frames,
+                )
+
+                for ef in extracted_frames:
+                    frame_end = min(ef.timestamp_seconds + frame_duration, duration)
+                    if frame_end <= ef.timestamp_seconds:
+                        frame_end = ef.timestamp_seconds + 0.1
+
+                    art_id = f"art-{media_id}-f{ef.frame_index}-{uuid.uuid4().hex[:6]}"
+                    source_ref = SourceReference(
+                        media_asset_id=media_id,
+                        start_seconds=ef.timestamp_seconds,
+                        end_seconds=frame_end,
+                    )
+                    artifact = Artifact(
+                        artifact_id=art_id,
+                        artifact_type="frame",
+                        media_type="image",
+                        storage_uri=ef.storage_uri,
+                        source_reference=source_ref,
+                        sha256=ef.sha256,
+                    )
+                    self.repository.add_artifact(artifact)
+                    output_artifact_ids.append(art_id)
+
+                if output_artifact_ids:
+                    continue
+
+            # Fallback to synthetic artifact creation for mock URIs
             current_t = start_t
             frame_idx = 0
 

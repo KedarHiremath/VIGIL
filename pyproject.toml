@@ -9,6 +9,8 @@ authors = [
 ]
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "av>=19.0.1",
+    "opencv-python>=5.0.0.93",
     "pydantic>=2.7,<3",
     "tzdata",
 ]
@@ -29,3 +31,6 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "vigil"
 module-root = "src"
+
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]

@@ -59,6 +59,30 @@ class MediaAsset(DomainModel):
         ),
     )
 
+    width: int | None = Field(
+        default=None,
+        gt=0,
+        description="Optional width in pixels for video or image media.",
+    )
+
+    height: int | None = Field(
+        default=None,
+        gt=0,
+        description="Optional height in pixels for video or image media.",
+    )
+
+    fps: float | None = Field(
+        default=None,
+        gt=0,
+        description="Optional frame rate in frames per second for video media.",
+    )
+
+    audio_sample_rate: int | None = Field(
+        default=None,
+        gt=0,
+        description="Optional audio sample rate in Hz for audio or video media.",
+    )
+
     @field_validator("storage_uri")
     @classmethod
     def validate_storage_uri(cls, value: str) -> str:
@@ -67,12 +91,12 @@ class MediaAsset(DomainModel):
             raise ValueError("Storage URI must not be blank.")
         return value
 
-    @field_validator("duration_seconds")
+    @field_validator("duration_seconds", "fps")
     @classmethod
     def validate_duration(cls, value: float | None) -> float | None:
-        """Reject non-finite durations."""
+        """Reject non-finite durations and frame rates."""
         if value is not None and not math.isfinite(value):
-            raise ValueError("Duration must be finite.")
+            raise ValueError("Value must be finite.")
         return value
 
     @field_validator("sha256")
