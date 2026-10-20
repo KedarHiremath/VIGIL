@@ -55,6 +55,33 @@ class Event(DomainModel):
         description="Optional timezone-aware estimated wall-clock end time.",
     )
 
+    start_seconds: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Optional footage-relative start offset in seconds.",
+    )
+
+    end_seconds: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Optional footage-relative end offset in seconds.",
+    )
+
+    reviewer: str | None = Field(
+        default=None,
+        description="Investigator identifier who reviewed or edited this event.",
+    )
+
+    review_notes: str | None = Field(
+        default=None,
+        description="Investigator notes or rationale recorded during review.",
+    )
+
+    reviewed_at: Timestamp | None = Field(
+        default=None,
+        description="Timezone-aware timestamp when review occurred.",
+    )
+
     @model_validator(mode="after")
     def validate_time_order(self) -> "Event":
         """Reject an end time earlier than the start time."""
@@ -64,4 +91,10 @@ class Event(DomainModel):
             and self.end_time < self.start_time
         ):
             raise ValueError("Event end time cannot precede start time.")
+        if (
+            self.start_seconds is not None
+            and self.end_seconds is not None
+            and self.end_seconds < self.start_seconds
+        ):
+            raise ValueError("Event end seconds cannot precede start seconds.")
         return self

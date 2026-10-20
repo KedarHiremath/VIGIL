@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import TypeVar
 
 from vigil.domain.artifact import Artifact
+from vigil.domain.audit import AuditLog
 from vigil.domain.camera import Camera
 from vigil.domain.coverage import CoverageRecord
 from vigil.domain.entity import Entity
@@ -53,6 +54,7 @@ class InvestigationRepository:
         self._reports: dict[str, Report] = {}
         self._model_outputs: dict[str, ModelOutput] = {}
         self._investigation_states: dict[str, InvestigationState] = {}
+        self._audit_logs: dict[str, AuditLog] = {}
 
     # -------------------------------------------------------------------------
     # Camera
@@ -79,7 +81,6 @@ class InvestigationRepository:
     def add_media_asset(self, media_asset: MediaAsset) -> MediaAsset:
         with self._lock:
             if media_asset.camera_id and media_asset.camera_id not in self._cameras:
-                # Note: soft warning or referential check
                 pass
             self._media_assets[media_asset.media_asset_id] = media_asset
             return media_asset
@@ -288,6 +289,34 @@ class InvestigationRepository:
             ]
 
     # -------------------------------------------------------------------------
+    # AuditLog
+    # -------------------------------------------------------------------------
+    def add_audit_log(self, audit_log: AuditLog) -> AuditLog:
+        with self._lock:
+            self._audit_logs[audit_log.audit_id] = audit_log
+            return audit_log
+
+    def get_audit_log(self, audit_id: str) -> AuditLog:
+        with self._lock:
+            log = self._audit_logs.get(audit_id)
+            if log is None:
+                raise EntityNotFoundError(f"AuditLog '{audit_id}' not found.")
+            return log
+
+    def list_audit_logs(
+        self,
+        investigation_id: str | None = None,
+        target_id: str | None = None,
+    ) -> list[AuditLog]:
+        with self._lock:
+            logs = list(self._audit_logs.values())
+            if investigation_id is not None:
+                logs = [l for l in logs if l.investigation_id == investigation_id]
+            if target_id is not None:
+                logs = [l for l in logs if l.target_id == target_id]
+            return sorted(logs, key=lambda l: l.timestamp)
+
+    # -------------------------------------------------------------------------
     # ModelOutput
     # -------------------------------------------------------------------------
     def add_model_output(self, output: ModelOutput) -> ModelOutput:
@@ -313,6 +342,7 @@ class InvestigationRepository:
                 "event": self._events,
                 "coverage": self._coverage_records,
                 "assessment": self._evidence_assessments,
+                "audit": self._audit_logs,
             }
             target_store = stores.get(expected_type)
             if target_store is None:

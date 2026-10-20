@@ -14,18 +14,27 @@ from fastapi import (
     Form,
     HTTPException,
     Query,
+    Request,
     Response,
     UploadFile,
     status,
 )
+from fastapi.responses import FileResponse
 
 from vigil.api.dependencies import get_investigation_service
 from vigil.api.schemas import (
+    EventEditRequest,
+    EventReviewRequest,
+    EventReviewResponse,
+    IncidentClipSliceRequest,
     InvestigationCreateResponse,
     InvestigationStatusResponse,
     InvestigationSummaryResponse,
+    ReportFinalizeRequest,
+    ReportFinalizeResponse,
 )
 from vigil.domain.artifact import Artifact
+from vigil.domain.audit import AuditLog
 from vigil.domain.coverage import CoverageRecord
 from vigil.domain.event import Event
 from vigil.domain.investigation import Investigation
@@ -293,6 +302,18 @@ def get_investigation_report(
         )
         return Response(content=md_text, media_type="text/markdown")
 
+    if format == "html":
+        html_content = service.export_report_html(investigation_id, report.report_id)
+        return Response(content=html_content, media_type="text/html")
+
+    if format == "pdf":
+        pdf_bytes = service.export_report_pdf(investigation_id, report.report_id)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="report_{investigation_id}.pdf"'},
+        )
+
     return report
 
 
@@ -383,12 +404,19 @@ def get_investigation_observations(
 )
 def get_investigation_events(
     investigation_id: str,
+    event_status: Annotated[
+        str | None,
+        Query(
+            alias="status",
+            description="Filter events by review status: proposed, under_review, confirmed, rejected",
+        ),
+    ] = None,
     service: Annotated[
         InvestigationService,
         Depends(get_investigation_service),
     ] = None,  # type: ignore[assignment]
 ) -> list[Event]:
-    """Retrieve all correlated events associated with an investigation."""
+    """Retrieve correlated events associated with an investigation, optionally filtered by status."""
     try:
         service.get_investigation(investigation_id)
     except EntityNotFoundError as exc:
@@ -397,7 +425,10 @@ def get_investigation_events(
             detail=f"Investigation '{investigation_id}' not found.",
         ) from exc
 
-    return service.get_events(investigation_id)
+    events = service.get_events(investigation_id)
+    if event_status:
+        events = [e for e in events if e.status.lower() == event_status.lower()]
+    return events
 
 
 @router.get(
@@ -446,3 +477,322 @@ def get_investigation_artifacts(
         ) from exc
 
     return service.get_artifacts(investigation_id)
+
+
+@router.get(
+    "/{investigation_id}/events/{event_id}",
+    response_model=Event,
+    summary="Get single event details",
+)
+def get_investigation_event_details(
+    investigation_id: str,
+    event_id: str,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> Event:
+    """Retrieve specific event record by ID."""
+    try:
+        service.get_investigation(investigation_id)
+        return service.repository.get_event(event_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/{investigation_id}/events/{event_id}/review",
+    response_model=EventReviewResponse,
+    summary="Human investigator review decision on a proposed event",
+)
+def review_event(
+    investigation_id: str,
+    event_id: str,
+    payload: EventReviewRequest,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> EventReviewResponse:
+    """Submit human verification (confirm or reject) or update review status for an event."""
+    try:
+        updated_event, audit_log = service.review_event(
+            investigation_id=investigation_id,
+            event_id=event_id,
+            status=payload.status,
+            reviewer=payload.reviewer,
+            notes=payload.notes,
+            description=payload.description,
+            event_type=payload.event_type,
+            start_seconds=payload.start_seconds,
+            end_seconds=payload.end_seconds,
+            start_time=payload.start_time,
+            end_time=payload.end_time,
+        )
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return EventReviewResponse(
+        event=updated_event,
+        audit_log=audit_log,
+        message=f"Event '{event_id}' review status updated to '{payload.status}'.",
+    )
+
+
+@router.patch(
+    "/{investigation_id}/events/{event_id}",
+    response_model=EventReviewResponse,
+    summary="Directly edit event attributes with audit logging",
+)
+def edit_event(
+    investigation_id: str,
+    event_id: str,
+    payload: EventEditRequest,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> EventReviewResponse:
+    """Apply direct investigator edits to an event record."""
+    updates = payload.model_dump(exclude_unset=True, exclude={"editor", "notes"})
+    try:
+        updated_event, audit_log = service.edit_event(
+            investigation_id=investigation_id,
+            event_id=event_id,
+            editor=payload.editor,
+            updates=updates,
+            notes=payload.notes,
+        )
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    return EventReviewResponse(
+        event=updated_event,
+        audit_log=audit_log,
+        message=f"Event '{event_id}' updated successfully.",
+    )
+
+
+@router.post(
+    "/{investigation_id}/events/{event_id}/clip",
+    response_model=Artifact,
+    summary="Cut playable incident video sub-clip for event",
+)
+def slice_event_clip(
+    investigation_id: str,
+    event_id: str,
+    payload: IncidentClipSliceRequest | None = None,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> Artifact:
+    """Extract playable incident video sub-clip around event interval."""
+    padding = payload.padding_seconds if payload else 1.0
+    try:
+        return service.slice_incident_clip(
+            investigation_id=investigation_id,
+            event_id=event_id,
+            padding_seconds=padding,
+        )
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Clip extraction failed: {exc}",
+        ) from exc
+
+
+@router.get(
+    "/{investigation_id}/audit",
+    response_model=list[AuditLog],
+    summary="Query audit trail of review decisions and modifications",
+)
+def get_investigation_audit_logs(
+    investigation_id: str,
+    target_id: Annotated[str | None, Query(description="Filter by target record ID")] = None,
+    actor: Annotated[str | None, Query(description="Filter by investigator/actor")] = None,
+    action: Annotated[str | None, Query(description="Filter by action type")] = None,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> list[AuditLog]:
+    """Retrieve chronological audit trail of human review actions and system updates."""
+    try:
+        return service.get_audit_logs(
+            investigation_id=investigation_id,
+            target_id=target_id,
+            actor=actor,
+            action=action,
+        )
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/{investigation_id}/report/finalize",
+    response_model=ReportFinalizeResponse,
+    summary="Finalize forensic report with incident clips and review conclusions",
+)
+def finalize_investigation_report(
+    investigation_id: str,
+    payload: ReportFinalizeRequest,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> ReportFinalizeResponse:
+    """Finalize the investigation report, incorporating verified event decisions and incident clips."""
+    try:
+        final_report, audit_log = service.finalize_report(
+            investigation_id=investigation_id,
+            finalized_by=payload.finalized_by,
+            title=payload.title,
+            summary=payload.summary,
+            notes=payload.notes,
+            auto_slice_clips=payload.auto_slice_clips,
+        )
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Report finalization failed: {exc}",
+        ) from exc
+
+    return ReportFinalizeResponse(
+        report=final_report,
+        audit_log=audit_log,
+        version=final_report.version,
+        clip_count=len(final_report.clip_artifact_ids),
+        message=f"Report finalized as version {final_report.version} by {payload.finalized_by}.",
+    )
+
+
+@router.get(
+    "/{investigation_id}/export/html",
+    summary="Export finalized forensic report as interactive standalone HTML",
+)
+def export_report_html(
+    investigation_id: str,
+    request: Request,
+    report_id: Annotated[str | None, Query(description="Optional specific report ID")] = None,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> Response:
+    """Generate interactive HTML forensic report with embedded incident video clips."""
+    base_url = str(request.base_url).rstrip("/")
+    try:
+        html_doc = service.export_report_html(
+            investigation_id=investigation_id,
+            report_id=report_id,
+            base_url=base_url,
+        )
+        return Response(content=html_doc, media_type="text/html")
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/{investigation_id}/export/pdf",
+    summary="Export finalized forensic report as publication-grade PDF deliverable",
+)
+def export_report_pdf(
+    investigation_id: str,
+    report_id: Annotated[str | None, Query(description="Optional specific report ID")] = None,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> Response:
+    """Generate court/audit-ready PDF document with metadata, event tables, and audit trail."""
+    try:
+        pdf_bytes = service.export_report_pdf(
+            investigation_id=investigation_id,
+            report_id=report_id,
+        )
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="report_{investigation_id}.pdf"'
+            },
+        )
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/{investigation_id}/artifacts/{artifact_id}/content",
+    summary="Stream or download extracted media artifact file (video clip, frame image, audio)",
+)
+def get_artifact_content(
+    investigation_id: str,
+    artifact_id: str,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> FileResponse:
+    """Stream or download actual artifact file content for browser playback or viewing."""
+    try:
+        service.get_investigation(investigation_id)
+        artifact = service.repository.get_artifact(artifact_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    local_path = service.get_artifact_content_path(artifact_id)
+    if not local_path or not local_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Artifact media file for '{artifact_id}' not found on server storage.",
+        )
+
+    media_type = "video/mp4" if artifact.media_type == "video" else ("audio/wav" if artifact.media_type == "audio" else "image/jpeg")
+    return FileResponse(path=local_path, media_type=media_type, filename=local_path.name)

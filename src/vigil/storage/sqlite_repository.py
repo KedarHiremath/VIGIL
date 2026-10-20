@@ -10,6 +10,7 @@ from types import TracebackType
 from typing import Self
 
 from vigil.domain.artifact import Artifact
+from vigil.domain.audit import AuditLog
 from vigil.domain.camera import Camera
 from vigil.domain.coverage import CoverageRecord
 from vigil.domain.entity import Entity
@@ -129,6 +130,20 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_media ON artifacts(media_asset_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_target ON evidence_assessments(target_id);
 CREATE INDEX IF NOT EXISTS idx_coverage_inv ON coverage_records(investigation_id);
 CREATE INDEX IF NOT EXISTS idx_reports_inv ON reports(investigation_id);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    audit_id TEXT PRIMARY KEY,
+    investigation_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_inv ON audit_logs(investigation_id);
+CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_logs(target_id);
 """
 
 
@@ -698,6 +713,69 @@ class SqliteInvestigationRepository(InvestigationRepository):
             return output
 
     # -------------------------------------------------------------------------
+    # AuditLog
+    # -------------------------------------------------------------------------
+    def add_audit_log(self, audit_log: AuditLog) -> AuditLog:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO audit_logs (audit_id, investigation_id, target_id, target_type, action, actor, timestamp, payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(audit_id) DO UPDATE SET
+                    action = excluded.action,
+                    actor = excluded.actor,
+                    payload = excluded.payload
+                """,
+                (
+                    audit_log.audit_id,
+                    audit_log.investigation_id,
+                    audit_log.target_id,
+                    audit_log.target_type,
+                    audit_log.action,
+                    audit_log.actor,
+                    audit_log.timestamp.isoformat(),
+                    audit_log.model_dump_json(),
+                ),
+            )
+            return audit_log
+
+    def get_audit_log(self, audit_id: str) -> AuditLog:
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT payload FROM audit_logs WHERE audit_id = ?",
+                (audit_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise EntityNotFoundError(f"AuditLog '{audit_id}' not found.")
+            return AuditLog.model_validate_json(row["payload"])
+
+    def list_audit_logs(
+        self,
+        investigation_id: str | None = None,
+        target_id: str | None = None,
+    ) -> list[AuditLog]:
+        with self._lock:
+            query = "SELECT payload FROM audit_logs"
+            conditions: list[str] = []
+            params: list[str] = []
+            if investigation_id is not None:
+                conditions.append("investigation_id = ?")
+                params.append(investigation_id)
+            if target_id is not None:
+                conditions.append("target_id = ?")
+                params.append(target_id)
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY timestamp ASC"
+
+            cursor = self._conn.execute(query, tuple(params))
+            return [
+                AuditLog.model_validate_json(row["payload"])
+                for row in cursor.fetchall()
+            ]
+
+    # -------------------------------------------------------------------------
     # Referential integrity checks
     # -------------------------------------------------------------------------
     def validate_references_exist(
@@ -717,6 +795,7 @@ class SqliteInvestigationRepository(InvestigationRepository):
             "event": ("events", "event_id"),
             "coverage": ("coverage_records", "coverage_id"),
             "assessment": ("evidence_assessments", "assessment_id"),
+            "audit": ("audit_logs", "audit_id"),
         }
 
         entry = table_map.get(expected_type)

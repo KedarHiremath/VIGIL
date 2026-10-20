@@ -15,6 +15,7 @@ dependencies = [
     "opencv-python>=5.0.0.93",
     "pydantic>=2.7,<3",
     "python-multipart>=0.0.9",
+    "reportlab>=5.0.1",
     "tzdata",
     "uvicorn>=0.28.0",
     "websockets>=12.0",

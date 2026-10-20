@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VIGIL &bull; Autonomous Video-Forensics Mission Control</title>
+  <link rel="stylesheet" href="/ui/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>">
+</head>
+<body>
+  <!-- Top Navigation Header -->
+  <header class="navbar">
+    <div class="nav-left">
+      <div class="brand">
+        <div class="brand-radar"></div>
+        <span class="brand-name">VIGIL</span>
+        <span class="brand-sub">FORENSIC SUITE</span>
+      </div>
+      
+      <div class="inv-picker-wrap">
+        <label for="invSelect" class="inv-label">ACTIVE CASE:</label>
+        <select id="invSelect" class="inv-select">
+          <option value="" disabled selected>Loading investigations...</option>
+        </select>
+        <button id="refreshInvBtn" class="btn btn-icon" title="Refresh Cases">&#x21bb;</button>
+      </div>
+    </div>
+
+    <div class="nav-center">
+      <div id="caseStatusBadge" class="status-pill status-ready">NO CASE LOADED</div>
+      <div id="wsIndicator" class="ws-pill ws-disconnected">
+        <span class="ws-dot"></span>
+        <span id="wsLabel">WS: DISCONNECTED</span>
+      </div>
+    </div>
+
+    <div class="nav-right">
+      <button id="newInvBtn" class="btn btn-primary">
+        <span class="btn-icon-plus">+</span> Ingest Footage
+      </button>
+      <div class="export-dropdown-wrap">
+        <button id="exportMenuBtn" class="btn btn-secondary">Export Deliverable &#x25BE;</button>
+        <div id="exportMenu" class="dropdown-menu hidden">
+          <button id="exportPdfBtn" class="dropdown-item">Download PDF Report</button>
+          <button id="exportHtmlBtn" class="dropdown-item">Open HTML Report</button>
+          <button id="exportMdBtn" class="dropdown-item">View Markdown Summary</button>
+          <hr class="dropdown-sep">
+          <button id="finalizeReportBtn" class="dropdown-item finalize-item">Finalize &amp; Sign Case</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Workspace -->
+  <main class="workspace">
+    <!-- Left Column: Live Agent Mission Control / Telemetry -->
+    <aside class="panel telemetry-panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span class="panel-icon">&#x1F4E1;</span> AGENT MISSION CONTROL
+        </div>
+        <span id="telemetryCount" class="badge">0 events</span>
+      </div>
+
+      <div class="agent-roster">
+        <div class="agent-chip" id="chip-planner" title="Decomposes investigation objectives">
+          <span class="agent-chip-dot"></span> Planner
+        </div>
+        <div class="agent-chip" id="chip-visual" title="Extracts and inspects image frames">
+          <span class="agent-chip-dot"></span> Visual
+        </div>
+        <div class="agent-chip" id="chip-audio" title="Demuxes audio and transcribes acoustics">
+          <span class="agent-chip-dot"></span> Audio
+        </div>
+        <div class="agent-chip" id="chip-temporal" title="Correlates multi-modal timeline events">
+          <span class="agent-chip-dot"></span> Temporal
+        </div>
+        <div class="agent-chip" id="chip-verifier" title="Assesses evidence uncertainty & coverage">
+          <span class="agent-chip-dot"></span> Verifier
+        </div>
+        <div class="agent-chip" id="chip-reporter" title="Synthesizes structured forensic reports">
+          <span class="agent-chip-dot"></span> Reporter
+        </div>
+      </div>
+
+      <div class="telemetry-feed" id="telemetryFeed">
+        <div class="empty-state">Select an active investigation or upload footage to monitor live agent actions.</div>
+      </div>
+    </aside>
+
+    <!-- Center Column: Video Player & Incident Clip Station -->
+    <section class="panel media-panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span class="panel-icon">&#x1F3AC;</span> FOOTAGE &amp; INCIDENT CLIPS
+        </div>
+        <div class="media-tabs" id="mediaTabs">
+          <button class="tab-btn active" data-tab="primary">Primary Footage</button>
+          <button class="tab-btn" data-tab="clips">Incident Sub-clips (<span id="clipsCount">0</span>)</button>
+        </div>
+      </div>
+
+      <div class="video-container">
+        <video id="mainVideoPlayer" controls preload="metadata">
+          <p>Select video footage to review.</p>
+        </video>
+        <div id="videoPlaceholder" class="video-placeholder">
+          <div class="placeholder-icon">&#x1F39E;</div>
+          <p>No video loaded</p>
+          <button id="placeholderUploadBtn" class="btn btn-outline">Upload Video Footage</button>
+        </div>
+      </div>
+
+      <!-- Playback Controls and Telemetry Time Scrubber -->
+      <div class="playback-toolbar">
+        <div class="timecode-display">
+          <span id="currentTimeDisplay">00:00.00</span> / <span id="durationDisplay">00:00.00</span>
+        </div>
+        <div class="seek-controls">
+          <button id="seekBackBtn" class="btn btn-sm btn-icon" title="Rewind 2s">&#x23EA; -2s</button>
+          <button id="playPauseBtn" class="btn btn-sm btn-icon" title="Play/Pause">&#x25B6; Play</button>
+          <button id="seekFwdBtn" class="btn btn-sm btn-icon" title="Forward 2s">&#x23E9; +2s</button>
+        </div>
+        <div class="source-metadata" id="sourceMetaText">SHA-256: -</div>
+      </div>
+
+      <!-- Timeline Bar Canvas with Incident Markers -->
+      <div class="timeline-container">
+        <div class="timeline-header">
+          <span>INVESTIGATION TIMELINE &amp; INCIDENT INTERVALS</span>
+          <span id="timelineSpanLabel">0s &ndash; 0s</span>
+        </div>
+        <div class="timeline-track" id="timelineTrack">
+          <div class="timeline-progress" id="timelineProgress"></div>
+          <div id="timelineMarkersContainer"></div>
+        </div>
+      </div>
+
+      <!-- Incident Subclips Carousel / List -->
+      <div id="clipsGalleryView" class="clips-gallery hidden">
+        <div class="gallery-empty" id="clipsEmptyNotice">No incident clips sliced yet. Confirm events to auto-generate review clips.</div>
+        <div class="clips-grid" id="clipsGrid"></div>
+      </div>
+    </section>
+
+    <!-- Right Column: Interactive Human Review Station (Phase 5) -->
+    <aside class="panel review-panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span class="panel-icon">&#x2696;&#xFE0F;</span> HUMAN REVIEW STATION
+        </div>
+        <div class="filter-pills">
+          <button class="filter-pill active" data-filter="all">All (<span id="countAll">0</span>)</button>
+          <button class="filter-pill" data-filter="proposed">Proposed (<span id="countProposed">0</span>)</button>
+          <button class="filter-pill" data-filter="confirmed">Confirmed (<span id="countConfirmed">0</span>)</button>
+          <button class="filter-pill" data-filter="rejected">Rejected (<span id="countRejected">0</span>)</button>
+        </div>
+      </div>
+
+      <div class="events-list" id="eventsList">
+        <div class="empty-state">No events correlated for this case.</div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Bottom Drawer: Evidence Assessments, Frame Gallery, and Audit Trail -->
+  <footer class="bottom-drawer" id="bottomDrawer">
+    <div class="drawer-header" id="drawerToggle">
+      <div class="drawer-title">
+        <span>&#x1F4CA; EVIDENCE REPOSITORY &amp; AUDIT TRAIL</span>
+        <span class="drawer-toggle-icon" id="drawerToggleIcon">&#x25B2;</span>
+      </div>
+      <div class="drawer-tabs">
+        <button class="drawer-tab active" data-target="tabFrames">Extracted Frames (<span id="framesCount">0</span>)</button>
+        <button class="drawer-tab" data-target="tabAssessments">Evidence Assessments</button>
+        <button class="drawer-tab" data-target="tabAudit">Audit Trail (<span id="auditCount">0</span>)</button>
+        <button class="drawer-tab" data-target="tabReport">Report Summary</button>
+      </div>
+    </div>
+
+    <div class="drawer-content" id="drawerContent">
+      <!-- Tab 1: Extracted Frames -->
+      <div class="drawer-tab-pane active" id="tabFrames">
+        <div class="frame-gallery" id="frameGallery">
+          <div class="gallery-empty">No frames extracted yet.</div>
+        </div>
+      </div>
+
+      <!-- Tab 2: Evidence Assessments -->
+      <div class="drawer-tab-pane" id="tabAssessments">
+        <table class="forensic-table" id="assessmentsTable">
+          <thead>
+            <tr>
+              <th>Target</th>
+              <th>Assessment Type</th>
+              <th>Rating</th>
+              <th>Rationale</th>
+              <th>Assessor</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="5" style="text-align:center;">No evidence assessments available.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Tab 3: Audit Trail -->
+      <div class="drawer-tab-pane" id="tabAudit">
+        <table class="forensic-table" id="auditTable">
+          <thead>
+            <tr>
+              <th>Timestamp (UTC)</th>
+              <th>Investigator / Actor</th>
+              <th>Action</th>
+              <th>Target ID</th>
+              <th>Changes Recorded</th>
+              <th>Notes &amp; Justification</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="6" style="text-align:center;">No audit actions logged.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Tab 4: Report Summary -->
+      <div class="drawer-tab-pane" id="tabReport">
+        <div class="report-preview-box" id="reportPreviewBox">
+          <div class="gallery-empty">No report generated for this case.</div>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Modal 1: Ingest Footage / New Investigation -->
+  <div id="newInvModal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>&#x1F4E5; Ingest Video Footage &amp; Start Investigation</h3>
+        <button class="modal-close" id="closeNewInvModal">&times;</button>
+      </div>
+      <form id="newInvForm" class="modal-body">
+        <div class="drop-zone" id="dropZone">
+          <div class="drop-icon">&#x1F4F9;</div>
+          <div class="drop-text">Drag &amp; drop video footage file (.mp4, .mkv, .avi)</div>
+          <div class="drop-sub">or click to browse local files</div>
+          <input type="file" id="videoFileInput" accept="video/*" class="file-input-hidden">
+          <div id="selectedFileLabel" class="selected-file-label hidden"></div>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="invTitleInput">Case / Investigation Title</label>
+            <input type="text" id="invTitleInput" placeholder="e.g. Breach Analysis: South Perimeter Gate">
+          </div>
+          <div class="form-group">
+            <label for="invCameraInput">Camera ID / Label</label>
+            <input type="text" id="invCameraInput" placeholder="e.g. cam-north-01">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="invObjectiveInput">Forensic Objective &amp; Target Questions</label>
+          <textarea id="invObjectiveInput" rows="2" placeholder="e.g. Identify all unauthorized entries into restricted zone between 00:00 and 01:00. Verify clothing and carried objects."></textarea>
+        </div>
+
+        <div class="form-grid-3">
+          <div class="form-group">
+            <label for="invSampleInterval">Sample Interval (s)</label>
+            <input type="number" id="invSampleInterval" value="2.0" step="0.5" min="0.5" max="10.0">
+          </div>
+          <div class="form-group">
+            <label for="invMaxFrames">Max Frames</label>
+            <input type="number" id="invMaxFrames" value="30" step="5" min="5" max="150">
+          </div>
+          <div class="form-group">
+            <label for="invExtractAudio">Extract Audio</label>
+            <select id="invExtractAudio">
+              <option value="true" selected>Yes (Demux &amp; Transcribe)</option>
+              <option value="false">No (Visual Only)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="cancelNewInvBtn">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="startInvBtn">
+            <span class="btn-spinner hidden" id="uploadSpinner">&#x21bb;</span> Launch Autonomous Agents
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal 2: Human Review & Edit Event (Phase 5) -->
+  <div id="reviewModal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="reviewModalTitle">&#x2696;&#xFE0F; Review Forensic Event</h3>
+        <button class="modal-close" id="closeReviewModal">&times;</button>
+      </div>
+      <form id="reviewForm" class="modal-body">
+        <input type="hidden" id="revEventId">
+        
+        <div class="form-group">
+          <label>Decision Status</label>
+          <div class="radio-group">
+            <label class="radio-label status-confirmed-btn">
+              <input type="radio" name="revStatus" value="confirmed" checked> Confirm (Verified)
+            </label>
+            <label class="radio-label status-rejected-btn">
+              <input type="radio" name="revStatus" value="rejected"> Reject (False Positive)
+            </label>
+            <label class="radio-label status-review-btn">
+              <input type="radio" name="revStatus" value="under_review"> Keep Under Review
+            </label>
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="revReviewerInput">Investigator Badge / ID *</label>
+            <input type="text" id="revReviewerInput" required placeholder="e.g. badge-402, det-carter">
+          </div>
+          <div class="form-group">
+            <label for="revCategoryInput">Category</label>
+            <input type="text" id="revCategoryInput" placeholder="e.g. perimeter_breach">
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="revStartSec">Start Offset (seconds)</label>
+            <input type="number" id="revStartSec" step="0.1" min="0">
+          </div>
+          <div class="form-group">
+            <label for="revEndSec">End Offset (seconds)</label>
+            <input type="number" id="revEndSec" step="0.1" min="0">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="revDescriptionInput">Event Description</label>
+          <textarea id="revDescriptionInput" rows="2" placeholder="Describe verified activity..."></textarea>
+        </div>
+
+        <div class="form-group">
+          <label for="revNotesInput">Forensic Rationale / Notes</label>
+          <textarea id="revNotesInput" rows="2" placeholder="Record corroborating evidence, facial match, or dismissal justification..."></textarea>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="cancelReviewBtn">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="saveReviewBtn">Save Decision &amp; Audit Log</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal 3: Finalize Report -->
+  <div id="finalizeModal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>&#x1F4DC; Finalize Investigation &amp; Sign Case</h3>
+        <button class="modal-close" id="closeFinalizeModal">&times;</button>
+      </div>
+      <form id="finalizeForm" class="modal-body">
+        <div class="form-group">
+          <label for="finInvestigatorInput">Lead Investigator / Finalized By *</label>
+          <input type="text" id="finInvestigatorInput" required placeholder="e.g. Chief Investigator Davis">
+        </div>
+        <div class="form-group">
+          <label for="finTitleInput">Deliverable Title</label>
+          <input type="text" id="finTitleInput" placeholder="Official Final Forensic Report">
+        </div>
+        <div class="form-group">
+          <label for="finNotesInput">Case Sign-Off Notes / Chain of Custody Remarks</label>
+          <textarea id="finNotesInput" rows="3" placeholder="Case concluded with verified evidence. Playable video sub-clips sliced for all confirmed events and embedded in final report."></textarea>
+        </div>
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="finAutoClips" checked>
+            Auto-slice reviewable H.264 video sub-clips for all confirmed events
+          </label>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="cancelFinalizeBtn">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="submitFinalizeBtn">Finalize &amp; Lock Deliverable</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <!-- Application Script -->
+  <script src="/ui/app.js"></script>
+</body>
+</html>

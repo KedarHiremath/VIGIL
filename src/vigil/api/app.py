@@ -6,10 +6,12 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from vigil.api.dependencies import (
     get_investigation_service,
@@ -75,6 +77,18 @@ def create_app() -> FastAPI:
             "service": "VIGIL Video Forensics API",
             "version": "0.1.0",
         }
+
+    # Mount UI static assets and serve dashboard
+    ui_dir = Path(__file__).parent.parent / "ui"
+    if ui_dir.is_dir():
+        app.mount("/ui", StaticFiles(directory=str(ui_dir)), name="ui")
+
+        @app.get("/", tags=["ui"], summary="VIGIL Web UI Mission Control")
+        @app.get("/dashboard", tags=["ui"])
+        def serve_dashboard() -> FileResponse:
+            """Serve interactive VIGIL forensic frontend dashboard."""
+            index_file = ui_dir / "index.html"
+            return FileResponse(index_file)
 
     # Include routers
     app.include_router(investigations_router)

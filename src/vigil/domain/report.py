@@ -1,6 +1,7 @@
 """Domain schema for investigation reports."""
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import Field, field_validator
 
@@ -20,6 +21,32 @@ class Report(DomainModel):
     event_ids: ReferenceIds = Field(default_factory=list)
     assessment_ids: ReferenceIds = Field(default_factory=list)
     coverage_ids: ReferenceIds = Field(default_factory=list)
+
+    version: int = Field(
+        default=1,
+        ge=1,
+        description="Sequential version number of the report.",
+    )
+    status: Literal["draft", "in_review", "finalized"] = Field(
+        default="draft",
+        description="Review and finalization status of the report.",
+    )
+    clip_artifact_ids: ReferenceIds = Field(
+        default_factory=list,
+        description="Artifact IDs for playable incident sub-clips embedded in the report.",
+    )
+    notes: str | None = Field(
+        default=None,
+        description="Investigator comments, review rationale, or closing remarks.",
+    )
+    finalized_at: Timestamp | None = Field(
+        default=None,
+        description="Timestamp when report was formally finalized.",
+    )
+    finalized_by: str | None = Field(
+        default=None,
+        description="Investigator username/badge who finalized the report.",
+    )
 
     generated_at: Timestamp = Field(default_factory=lambda: datetime.now(UTC))
     generated_by: str = Field(min_length=1)

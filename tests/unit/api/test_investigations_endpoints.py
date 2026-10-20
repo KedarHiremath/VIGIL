@@ -179,3 +179,15 @@ def test_endpoints_404_not_found(test_setup) -> None:
     assert client.get("/api/v1/investigations/unknown-id/events").status_code == 404
     assert client.get("/api/v1/investigations/unknown-id/coverage").status_code == 404
     assert client.get("/api/v1/investigations/unknown-id/artifacts").status_code == 404
+
+
+def test_dashboard_endpoints(test_setup) -> None:
+    client, _, _ = test_setup
+    r1 = client.get("/")
+    assert r1.status_code == 200
+    assert "VIGIL" in r1.text
+    assert "MISSION CONTROL" in r1.text
+
+    r2 = client.get("/dashboard")
+    assert r2.status_code == 200
+    assert "VIGIL" in r2.text
