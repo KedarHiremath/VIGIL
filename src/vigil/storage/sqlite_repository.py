@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS observations (
 CREATE TABLE IF NOT EXISTS entities (
     entity_id TEXT PRIMARY KEY,
     entity_type TEXT NOT NULL,
-    name TEXT NOT NULL,
+    label TEXT,
     payload TEXT NOT NULL
 );
 
@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS evidence_assessments (
 CREATE TABLE IF NOT EXISTS coverage_records (
     coverage_id TEXT PRIMARY KEY,
     investigation_id TEXT NOT NULL,
-    media_asset_id TEXT NOT NULL,
+    source_reference_id TEXT NOT NULL,
     payload TEXT NOT NULL
 );
 
@@ -372,17 +372,17 @@ class SqliteInvestigationRepository(InvestigationRepository):
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO entities (entity_id, entity_type, name, payload)
+                INSERT INTO entities (entity_id, entity_type, label, payload)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(entity_id) DO UPDATE SET
                     entity_type = excluded.entity_type,
-                    name = excluded.name,
+                    label = excluded.label,
                     payload = excluded.payload
                 """,
                 (
                     entity.entity_id,
                     entity.entity_type,
-                    entity.name,
+                    entity.label,
                     entity.model_dump_json(),
                 ),
             )
@@ -529,17 +529,17 @@ class SqliteInvestigationRepository(InvestigationRepository):
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO coverage_records (coverage_id, investigation_id, media_asset_id, payload)
+                INSERT INTO coverage_records (coverage_id, investigation_id, source_reference_id, payload)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(coverage_id) DO UPDATE SET
                     investigation_id = excluded.investigation_id,
-                    media_asset_id = excluded.media_asset_id,
+                    source_reference_id = excluded.source_reference_id,
                     payload = excluded.payload
                 """,
                 (
                     record.coverage_id,
                     record.investigation_id,
-                    record.media_asset_id,
+                    record.source_reference_id,
                     record.model_dump_json(),
                 ),
             )
@@ -594,6 +594,14 @@ class SqliteInvestigationRepository(InvestigationRepository):
                     f"Investigation '{investigation_id}' not found."
                 )
             return Investigation.model_validate_json(row["payload"])
+
+    def list_investigations(self) -> list[Investigation]:
+        with self._lock:
+            cursor = self._conn.execute("SELECT payload FROM investigations")
+            return [
+                Investigation.model_validate_json(row["payload"])
+                for row in cursor.fetchall()
+            ]
 
     def save_state(self, state: InvestigationState) -> InvestigationState:
         with self._lock, self._conn:

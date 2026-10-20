@@ -1,8 +1,10 @@
 """Agentic Orchestrator and Lead Investigator coordinating multi-phase video forensics."""
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from vigil.agent.planner import InvestigationPlanner
 from vigil.agent.registry import create_default_executor
@@ -136,6 +138,7 @@ class AgenticOrchestrator:
     def run_investigation(
         self,
         investigation: Investigation,
+        event_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> InvestigationOutcome:
         """Run the full autonomous agentic forensic investigation loop."""
         # Save investigation in repository
@@ -147,9 +150,33 @@ class AgenticOrchestrator:
             status=InvestigationStatus.CREATED,
         )
         self.repository.save_state(state)
+        if event_callback:
+            event_callback(
+                "state_changed",
+                {
+                    "investigation_id": investigation.investigation_id,
+                    "status": state.status.value,
+                    "updated_at": state.updated_at.isoformat(),
+                },
+            )
 
         # Generate investigation plan
         planned_tasks = self.planner.plan_investigation(investigation)
+        if event_callback:
+            event_callback(
+                "plan_created",
+                {
+                    "investigation_id": investigation.investigation_id,
+                    "task_count": len(planned_tasks),
+                    "tasks": [
+                        {
+                            "task_type": t.task_type,
+                            "description": t.description,
+                        }
+                        for t in planned_tasks
+                    ],
+                },
+            )
         task_results: list[TaskResult] = []
 
         # Execute each planned task through the orchestration service
@@ -159,10 +186,82 @@ class AgenticOrchestrator:
                 or "lead-investigator"
             )
 
+            if event_callback:
+                event_callback(
+                    "task_started",
+                    {
+                        "investigation_id": investigation.investigation_id,
+                        "task_id": task_req.task_id,
+                        "task_type": task_req.task_type,
+                        "description": planned.description,
+                    },
+                )
+
+            prev_obs_ids = set(state.observation_ids)
+            prev_evt_ids = set(state.event_ids)
+
             # Execute step
             outcome = self.step(state, task_req)
             state = outcome.state
             task_results.append(outcome.task_result)
+
+            if event_callback:
+                # Report new observations
+                new_obs_ids = set(state.observation_ids) - prev_obs_ids
+                if new_obs_ids:
+                    new_obs = self.repository.list_observations(list(new_obs_ids))
+                    for obs in new_obs:
+                        event_callback(
+                            "observation_detected",
+                            {
+                                "investigation_id": investigation.investigation_id,
+                                "task_id": task_req.task_id,
+                                "observation": obs.model_dump(mode="json"),
+                            },
+                        )
+
+                # Report new events
+                new_evt_ids = set(state.event_ids) - prev_evt_ids
+                if new_evt_ids:
+                    new_evts = self.repository.list_events(list(new_evt_ids))
+                    for evt in new_evts:
+                        event_callback(
+                            "event_correlated",
+                            {
+                                "investigation_id": investigation.investigation_id,
+                                "task_id": task_req.task_id,
+                                "event": evt.model_dump(mode="json"),
+                            },
+                        )
+
+                # Report coverage updates
+                if task_req.task_type == "coverage_evaluation":
+                    cov_records = self.repository.list_coverage_records(
+                        investigation.investigation_id
+                    )
+                    for cov in cov_records:
+                        event_callback(
+                            "coverage_updated",
+                            {
+                                "investigation_id": investigation.investigation_id,
+                                "task_id": task_req.task_id,
+                                "coverage": cov.model_dump(mode="json"),
+                            },
+                        )
+
+                event_callback(
+                    "task_completed",
+                    {
+                        "investigation_id": investigation.investigation_id,
+                        "task_id": task_req.task_id,
+                        "task_type": task_req.task_type,
+                        "status": outcome.task_result.status.value,
+                        "output_refs": outcome.task_result.output_refs,
+                        "error": outcome.task_result.error.model_dump(mode="json")
+                        if outcome.task_result.error
+                        else None,
+                    },
+                )
 
             # If task failed, stop the investigation pipeline
             if outcome.task_result.status == TaskStatus.FAILED:
@@ -170,6 +269,17 @@ class AgenticOrchestrator:
                     f"Investigation task {task_req.task_id} failed: "
                     f"{outcome.task_result.error}"
                 )
+                if event_callback:
+                    event_callback(
+                        "investigation_failed",
+                        {
+                            "investigation_id": investigation.investigation_id,
+                            "failed_task_id": task_req.task_id,
+                            "error": outcome.task_result.error.message
+                            if outcome.task_result.error
+                            else "Task execution failed",
+                        },
+                    )
                 break
 
         # If all tasks succeeded or yielded partial results, complete the investigation
@@ -183,6 +293,25 @@ class AgenticOrchestrator:
             )
             if reports:
                 final_report = reports[-1]
+
+            if event_callback:
+                event_callback(
+                    "state_changed",
+                    {
+                        "investigation_id": investigation.investigation_id,
+                        "status": state.status.value,
+                        "updated_at": state.updated_at.isoformat(),
+                    },
+                )
+                event_callback(
+                    "investigation_completed",
+                    {
+                        "investigation_id": investigation.investigation_id,
+                        "status": state.status.value,
+                        "report_id": final_report.report_id if final_report else None,
+                        "report_title": final_report.title if final_report else None,
+                    },
+                )
 
         # Collect consolidated findings
         return InvestigationOutcome(

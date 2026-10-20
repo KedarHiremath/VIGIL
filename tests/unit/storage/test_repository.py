@@ -50,3 +50,20 @@ def test_repository_referential_integrity() -> None:
     # Invalid check
     with pytest.raises(ReferentialIntegrityError):
         repo.validate_references_exist(["media-missing"], expected_type="media_asset")
+
+
+def test_repository_list_investigations() -> None:
+    from vigil.domain.investigation import Investigation
+
+    repo = InvestigationRepository()
+    assert repo.list_investigations() == []
+
+    inv1 = Investigation(
+        investigation_id="inv-1",
+        title="Inv 1",
+        objective="Obj 1",
+        scope_description="Scope 1",
+    )
+    repo.add_investigation(inv1)
+    assert len(repo.list_investigations()) == 1
+    assert repo.list_investigations()[0].investigation_id == "inv-1"

@@ -75,3 +75,45 @@ def test_lead_investigator_agent_full_run() -> None:
     assert len(outcome.report.assessment_ids) > 0
     assert len(outcome.report.coverage_ids) > 0
     assert outcome.report.summary != ""
+
+
+def test_agent_run_investigation_with_event_callback() -> None:
+    repo = InvestigationRepository()
+    mock_llm = MockLLMClient()
+
+    asset = MediaAsset(
+        media_asset_id="media-event-01",
+        media_type="video",
+        storage_uri="file:///media/storage/event_cam.mp4",
+        duration_seconds=10.0,
+    )
+    repo.add_media_asset(asset)
+
+    agent = LeadInvestigatorAgent(
+        repository=repo,
+        llm_client=mock_llm,
+    )
+
+    inv = Investigation(
+        investigation_id="inv-cb-001",
+        title="Callback Test Investigation",
+        objective="Verify event notifications",
+        scope_description="Testing event callback",
+        media_asset_ids=["media-event-01"],
+    )
+
+    recorded_events: list[tuple[str, dict]] = []
+
+    def on_event(event_type: str, data: dict) -> None:
+        recorded_events.append((event_type, data))
+
+    outcome = agent.run_investigation(inv, event_callback=on_event)
+    assert outcome.state.status == InvestigationStatus.COMPLETED
+
+    event_types = [ev[0] for ev in recorded_events]
+    assert "state_changed" in event_types
+    assert "plan_created" in event_types
+    assert "task_started" in event_types
+    assert "task_completed" in event_types
+    assert "observation_detected" in event_types
+    assert "investigation_completed" in event_types

@@ -7,6 +7,7 @@ import pytest
 
 from vigil.domain.artifact import Artifact
 from vigil.domain.camera import Camera
+from vigil.domain.entity import Entity
 from vigil.domain.event import Event
 from vigil.domain.investigation import Investigation
 from vigil.domain.media_asset import MediaAsset
@@ -103,6 +104,14 @@ def test_sqlite_repository_persistence_across_restarts(tmp_path: Path) -> None:
         )
         repo1.add_observation(obs)
 
+        ent = Entity(
+            entity_id="ent-001",
+            entity_type="person",
+            label="Suspicious individual",
+            associated_observation_ids=["obs-001"],
+        )
+        repo1.add_entity(ent)
+
         evt = Event(
             event_id="evt-001",
             event_type="entrance",
@@ -120,6 +129,16 @@ def test_sqlite_repository_persistence_across_restarts(tmp_path: Path) -> None:
         )
         repo1.add_investigation(inv)
 
+        from vigil.domain.coverage import CoverageRecord, CoverageStatus
+        cov = CoverageRecord(
+            coverage_id="cov-001",
+            investigation_id="inv-001",
+            source_reference_id="ref-001",
+            status=CoverageStatus.EXAMINED,
+            examined_at=now,
+        )
+        repo1.add_coverage_record(cov)
+
         state = InvestigationState(
             investigation_id="inv-001",
             status=InvestigationStatus.RUNNING,
@@ -136,8 +155,10 @@ def test_sqlite_repository_persistence_across_restarts(tmp_path: Path) -> None:
         assert repo2.get_media_asset("media-002").duration_seconds == 45.0
         assert repo2.get_artifact("art-001").artifact_type == "frame"
         assert repo2.get_observation("obs-001").confidence == 0.92
+        assert repo2.get_entity("ent-001").label == "Suspicious individual"
         assert repo2.get_event("evt-001").event_type == "entrance"
         assert repo2.get_investigation("inv-001").title == "Lobby Security Incident"
+        assert len(repo2.list_coverage_records("inv-001")) == 1
 
         state2 = repo2.get_state("inv-001")
         assert state2 is not None
@@ -166,3 +187,19 @@ def test_sqlite_missing_entity_raises() -> None:
     repo = SqliteInvestigationRepository(":memory:")
     with pytest.raises(EntityNotFoundError):
         repo.get_camera("unknown-cam")
+
+
+def test_sqlite_list_investigations() -> None:
+    repo = SqliteInvestigationRepository(":memory:")
+    assert repo.list_investigations() == []
+
+    inv = Investigation(
+        investigation_id="inv-sql-1",
+        title="SQL Inv 1",
+        objective="Objective 1",
+        scope_description="Scope 1",
+    )
+    repo.add_investigation(inv)
+    invs = repo.list_investigations()
+    assert len(invs) == 1
+    assert invs[0].investigation_id == "inv-sql-1"

@@ -249,6 +249,10 @@ class InvestigationRepository:
                 )
             return inv
 
+    def list_investigations(self) -> list[Investigation]:
+        with self._lock:
+            return list(self._investigations.values())
+
     def save_state(self, state: InvestigationState) -> InvestigationState:
         with self._lock:
             self._investigation_states[state.investigation_id] = state
