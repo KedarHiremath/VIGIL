@@ -1,5 +1,27 @@
 """Groq Cloud Free Tier client using standard library HTTP."""
 
+import base64
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+
+def _ensure_base64_image(image_data: str) -> str:
+    """Resolve file URI or local path into base64 string if necessary."""
+    try:
+        if image_data.startswith("file://"):
+            parsed = urlparse(image_data)
+            path_str = unquote(parsed.path)
+            if path_str.startswith("/") and len(path_str) > 2 and path_str[2] == ":":
+                path_str = path_str[1:]
+            p = Path(path_str)
+            if p.is_file():
+                return base64.b64encode(p.read_bytes()).decode("utf-8")
+        elif Path(image_data).is_file():
+            return base64.b64encode(Path(image_data).read_bytes()).decode("utf-8")
+    except Exception:
+        pass
+    return image_data
+
 import json
 import urllib.error
 import urllib.request
@@ -94,8 +116,9 @@ class GroqClient(BaseLLMClient):
         system_instruction: str | None = None,
         json_mode: bool = False,
     ) -> LLMResponse:
+        b64_data = _ensure_base64_image(image_data)
         image_url = (
-            f"data:{mime_type};base64,{image_data}"
+            f"data:{mime_type};base64,{b64_data}"
             if not image_data.startswith("http")
             else image_data
         )

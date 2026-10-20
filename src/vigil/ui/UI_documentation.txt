@@ -1,1 +1,17 @@
-"UI Details should come here"
+VIGIL Forensic Suite - UI Details
+==================================
+
+The interactive frontend implementation is located in:
+- HTML Layout: src/vigil/ui/index.html
+- Cyber-Forensic Styling: src/vigil/ui/style.css
+- Interactive Application Logic: src/vigil/ui/app.js
+
+Comprehensive documentation has been organized into:
+- documentation/frontend/README.md
+- documentation/frontend/ui_architecture_and_components.md
+- documentation/frontend/user_guide_and_workflows.md
+- documentation/frontend/api_integration_and_contracts.md
+
+To launch the Mission Control Dashboard:
+  uv run uvicorn vigil.api.app:app --host 0.0.0.0 --port 8000
+Then open http://localhost:8000/ or http://localhost:8000/dashboard in a browser.

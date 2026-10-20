@@ -28,6 +28,16 @@ class VisualDetectorWorker(BaseToolWorker):
                 raise ValueError("No image artifacts found for visual detection.")
             artifact_ids = [a.artifact_id for a in image_artifacts[:5]]
 
+        # Cap frames per task to avoid large payloads and API timeouts.
+        # Only send up to max_frames_per_task frames to the vision API per call.
+        max_frames_per_task = int(request.parameters.get("max_frames_per_task", 3))
+        artifact_ids = artifact_ids[:max_frames_per_task]
+        logger.info(
+            "VisualDetectorWorker: analyzing %d frame(s) for task %s",
+            len(artifact_ids),
+            request.task_id,
+        )
+
         output_observation_ids: list[str] = []
 
         for art_id in artifact_ids:

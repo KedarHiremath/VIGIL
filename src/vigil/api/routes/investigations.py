@@ -37,7 +37,9 @@ from vigil.domain.artifact import Artifact
 from vigil.domain.audit import AuditLog
 from vigil.domain.coverage import CoverageRecord
 from vigil.domain.event import Event
+from vigil.domain.evidence_assessment import EvidenceAssessment
 from vigil.domain.investigation import Investigation
+from vigil.domain.media_asset import MediaAsset
 from vigil.domain.observation import Observation
 from vigil.domain.report import Report
 from vigil.orchestration.investigation_state import InvestigationStatus
@@ -796,3 +798,146 @@ def get_artifact_content(
 
     media_type = "video/mp4" if artifact.media_type == "video" else ("audio/wav" if artifact.media_type == "audio" else "image/jpeg")
     return FileResponse(path=local_path, media_type=media_type, filename=local_path.name)
+
+
+
+@router.post(
+    "/demo",
+    response_model=InvestigationCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Seed and initialize a rich demo forensic investigation",
+)
+def create_demo_investigation(
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> InvestigationCreateResponse:
+    """Initialize a rich sample multi-modal investigation with synthetic surveillance video,
+
+    extracted frames, acoustic cues, observations, events, and reports.
+    """
+    try:
+        inv, result = service.create_demo_investigation()
+        return InvestigationCreateResponse(
+            investigation_id=inv.investigation_id,
+            title=inv.title,
+            status="completed",
+            media_asset_id=result.media_asset.media_asset_id,
+            camera_id="cam-north-04",
+            frame_count=len(result.frame_artifacts),
+            has_audio=True,
+            message="Demo forensic investigation seeded successfully.",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Failed to create demo investigation: {exc}",
+        ) from exc
+
+
+@router.get(
+    "/{investigation_id}/media",
+    response_model=list[MediaAsset],
+    summary="Get media assets associated with an investigation",
+)
+def get_investigation_media_assets(
+    investigation_id: str,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> list[MediaAsset]:
+    """Retrieve all physical media assets registered under this case."""
+    try:
+        return service.get_media_assets(investigation_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get(
+    "/{investigation_id}/media/primary/content",
+    summary="Stream primary video footage of the investigation",
+)
+def get_primary_media_content(
+    investigation_id: str,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> FileResponse:
+    """Convenience endpoint to stream the primary ingested video file for in-browser playback."""
+    try:
+        inv = service.get_investigation(investigation_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    if not inv.media_asset_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No media assets associated with this investigation.",
+        )
+
+    primary_id = inv.media_asset_ids[0]
+    return get_media_asset_content(investigation_id, primary_id, service)
+
+
+@router.get(
+    "/{investigation_id}/media/{media_asset_id}/content",
+    summary="Stream primary footage or media asset content",
+)
+def get_media_asset_content(
+    investigation_id: str,
+    media_asset_id: str,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> FileResponse:
+    """Stream original video footage or audio asset file."""
+    try:
+        service.get_investigation(investigation_id)
+        asset = service.repository.get_media_asset(media_asset_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    local_path = service.get_media_asset_content_path(media_asset_id)
+    if not local_path or not local_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Media file for asset '{media_asset_id}' not found on server storage.",
+        )
+
+    media_type = "video/mp4" if asset.media_type == "video" else ("audio/wav" if asset.media_type == "audio" else "image/jpeg")
+    return FileResponse(path=local_path, media_type=media_type, filename=local_path.name)
+
+
+@router.get(
+    "/{investigation_id}/assessments",
+    response_model=list[EvidenceAssessment],
+    summary="Get evidence quality and support assessments",
+)
+def get_investigation_assessments(
+    investigation_id: str,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> list[EvidenceAssessment]:
+    """Retrieve evidence assessments for an investigation."""
+    try:
+        return service.get_evidence_assessments(investigation_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc

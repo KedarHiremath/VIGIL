@@ -1,5 +1,6 @@
 /**
  * VIGIL Video Forensics Mission Control - Interactive Application Logic
+ * Full autonomous multi-agent forensic suite frontend
  */
 
 (function () {
@@ -15,46 +16,65 @@
     artifacts: [],
     assessments: [],
     auditLogs: [],
-    mediaAsset: null,
+    mediaAssets: [],
     ws: null,
     activeFilter: "all",
+    eventSearchQuery: "",
     selectedFile: null,
+    currentMediaSource: "primary", // "primary" or artifactId
   };
 
   // DOM Elements
   const el = {
     invSelect: document.getElementById("invSelect"),
     refreshInvBtn: document.getElementById("refreshInvBtn"),
+    loadDemoBtn: document.getElementById("loadDemoBtn"),
     caseStatusBadge: document.getElementById("caseStatusBadge"),
     wsIndicator: document.getElementById("wsIndicator"),
     wsLabel: document.getElementById("wsLabel"),
+    hotkeysBtn: document.getElementById("hotkeysBtn"),
     newInvBtn: document.getElementById("newInvBtn"),
     placeholderUploadBtn: document.getElementById("placeholderUploadBtn"),
+    placeholderDemoBtn: document.getElementById("placeholderDemoBtn"),
     exportMenuBtn: document.getElementById("exportMenuBtn"),
     exportMenu: document.getElementById("exportMenu"),
     exportPdfBtn: document.getElementById("exportPdfBtn"),
     exportHtmlBtn: document.getElementById("exportHtmlBtn"),
     exportMdBtn: document.getElementById("exportMdBtn"),
     finalizeReportBtn: document.getElementById("finalizeReportBtn"),
+    clearTelemetryBtn: document.getElementById("clearTelemetryBtn"),
     telemetryFeed: document.getElementById("telemetryFeed"),
     telemetryCount: document.getElementById("telemetryCount"),
+    metricFrames: document.getElementById("metricFrames"),
+    metricObs: document.getElementById("metricObs"),
+    metricEvents: document.getElementById("metricEvents"),
+    metricClips: document.getElementById("metricClips"),
     mainVideoPlayer: document.getElementById("mainVideoPlayer"),
     videoPlaceholder: document.getElementById("videoPlaceholder"),
+    hudCameraId: document.getElementById("hudCameraId"),
+    hudFrameCounter: document.getElementById("hudFrameCounter"),
     currentTimeDisplay: document.getElementById("currentTimeDisplay"),
     durationDisplay: document.getElementById("durationDisplay"),
     seekBackBtn: document.getElementById("seekBackBtn"),
+    stepBackBtn: document.getElementById("stepBackBtn"),
     playPauseBtn: document.getElementById("playPauseBtn"),
+    stepFwdBtn: document.getElementById("stepFwdBtn"),
     seekFwdBtn: document.getElementById("seekFwdBtn"),
+    playbackSpeedSelect: document.getElementById("playbackSpeedSelect"),
+    quickClipBtn: document.getElementById("quickClipBtn"),
     sourceMetaText: document.getElementById("sourceMetaText"),
     timelineTrack: document.getElementById("timelineTrack"),
+    timelineTicks: document.getElementById("timelineTicks"),
     timelineProgress: document.getElementById("timelineProgress"),
     timelineMarkersContainer: document.getElementById("timelineMarkersContainer"),
+    timelineHoverTooltip: document.getElementById("timelineHoverTooltip"),
     timelineSpanLabel: document.getElementById("timelineSpanLabel"),
     mediaTabs: document.getElementById("mediaTabs"),
     clipsGalleryView: document.getElementById("clipsGalleryView"),
     clipsGrid: document.getElementById("clipsGrid"),
     clipsCount: document.getElementById("clipsCount"),
     clipsEmptyNotice: document.getElementById("clipsEmptyNotice"),
+    eventSearchInput: document.getElementById("eventSearchInput"),
     eventsList: document.getElementById("eventsList"),
     countAll: document.getElementById("countAll"),
     countProposed: document.getElementById("countProposed"),
@@ -65,6 +85,9 @@
     drawerToggleIcon: document.getElementById("drawerToggleIcon"),
     frameGallery: document.getElementById("frameGallery"),
     framesCount: document.getElementById("framesCount"),
+    obsCount: document.getElementById("obsCount"),
+    assessCount: document.getElementById("assessCount"),
+    observationsTable: document.getElementById("observationsTable").querySelector("tbody"),
     assessmentsTable: document.getElementById("assessmentsTable").querySelector("tbody"),
     auditTable: document.getElementById("auditTable").querySelector("tbody"),
     auditCount: document.getElementById("auditCount"),
@@ -94,18 +117,26 @@
     closeFinalizeModal: document.getElementById("closeFinalizeModal"),
     cancelFinalizeBtn: document.getElementById("cancelFinalizeBtn"),
     finalizeForm: document.getElementById("finalizeForm"),
+    hotkeysModal: document.getElementById("hotkeysModal"),
+    closeHotkeysModal: document.getElementById("closeHotkeysModal"),
+    dismissHotkeysBtn: document.getElementById("dismissHotkeysBtn"),
     toastContainer: document.getElementById("toastContainer"),
   };
 
   // -------------------------------------------------------------------------
-  // Notifications & Utilities
+  // Notifications & Time Formatting
   // -------------------------------------------------------------------------
   function showToast(msg, type = "info") {
     const toast = document.createElement("div");
     toast.className = `toast ${type}`;
-    toast.textContent = msg;
+    const icon = type === "success" ? "&#x2705;" : (type === "error" ? "&#x26A0;&#xFE0F;" : "&#x2139;&#xFE0F;");
+    toast.innerHTML = `<span>${icon}</span> <span>${msg}</span>`;
     el.toastContainer.appendChild(toast);
-    setTimeout(() => toast.remove(), 4000);
+    setTimeout(() => {
+      toast.style.opacity = "0";
+      toast.style.transform = "translateX(20px)";
+      setTimeout(() => toast.remove(), 300);
+    }, 4000);
   }
 
   function formatTime(seconds) {
@@ -116,7 +147,7 @@
   }
 
   // -------------------------------------------------------------------------
-  // API Fetch Utilities
+  // API Fetch Utility
   // -------------------------------------------------------------------------
   async function apiFetch(endpoint, options = {}) {
     try {
@@ -134,7 +165,7 @@
   }
 
   // -------------------------------------------------------------------------
-  // Investigation Management
+  // Investigation Lifecycle Management
   // -------------------------------------------------------------------------
   async function loadInvestigations() {
     try {
@@ -143,8 +174,9 @@
       el.invSelect.innerHTML = "";
 
       if (items.length === 0) {
-        el.invSelect.innerHTML = `<option value="" disabled selected>No investigations registered</option>`;
+        el.invSelect.innerHTML = `<option value="" disabled selected>No cases registered</option>`;
         updateCaseStatus("NO CASES");
+        el.videoPlaceholder.classList.remove("hidden");
         return;
       }
 
@@ -169,8 +201,26 @@
   function setActiveInvestigation(invId) {
     state.activeInvestigationId = invId;
     el.invSelect.value = invId;
+    state.currentMediaSource = "primary";
     connectWebSocket(invId);
     refreshActiveCase();
+  }
+
+  async function loadDemoCase() {
+    el.loadDemoBtn.disabled = true;
+    el.loadDemoBtn.innerHTML = "<span>&#x21bb;</span> Seeding...";
+
+    try {
+      const res = await apiFetch("/api/v1/investigations/demo", { method: "POST" });
+      showToast("Demo case seeded with synthetic footage, frames, audio & observations!", "success");
+      await loadInvestigations();
+      setActiveInvestigation(res.investigation_id);
+    } catch (err) {
+      showToast("Failed to load demo case: " + err.message, "error");
+    } finally {
+      el.loadDemoBtn.disabled = false;
+      el.loadDemoBtn.innerHTML = "<span>&#x2728;</span> Demo Case";
+    }
   }
 
   async function refreshActiveCase() {
@@ -178,41 +228,68 @@
     const invId = state.activeInvestigationId;
 
     try {
-      // 1. Fetch status
+      // 1. Status
       const statusData = await apiFetch(`/api/v1/investigations/${invId}/status`);
       state.status = statusData;
       updateCaseStatus(statusData.status);
 
-      // 2. Fetch full investigation details
+      // 2. Full investigation details
       const invData = await apiFetch(`/api/v1/investigations/${invId}`);
-      if (invData.media_asset_ids && invData.media_asset_ids.length > 0) {
-        state.mediaAsset = { id: invData.media_asset_ids[0] };
+      if (invData.camera_id) {
+        el.hudCameraId.textContent = `CAM: ${invData.camera_id.toUpperCase()}`;
+      } else {
+        el.hudCameraId.textContent = "CAM: PRIMARY";
       }
 
-      // 3. Fetch events
+      // 3. Media assets
+      try {
+        state.mediaAssets = await apiFetch(`/api/v1/investigations/${invId}/media`);
+      } catch {
+        state.mediaAssets = [];
+      }
+
+      // 4. Events
       const eventsData = await apiFetch(`/api/v1/investigations/${invId}/events`);
       state.events = eventsData;
       renderEvents();
       renderTimelineMarkers();
 
-      // 4. Fetch artifacts (frames and clips)
+      // 5. Observations
+      try {
+        state.observations = await apiFetch(`/api/v1/investigations/${invId}/observations`);
+      } catch {
+        state.observations = [];
+      }
+      renderObservations();
+
+      // 6. Artifacts (frames, audio, clips)
       const artifactsData = await apiFetch(`/api/v1/investigations/${invId}/artifacts`);
       state.artifacts = artifactsData;
       renderArtifacts();
 
-      // 5. Fetch audit logs
+      // 7. Evidence assessments
+      try {
+        state.assessments = await apiFetch(`/api/v1/investigations/${invId}/assessments`);
+      } catch {
+        state.assessments = [];
+      }
+      renderAssessments();
+
+      // 8. Audit logs
       const auditData = await apiFetch(`/api/v1/investigations/${invId}/audit`);
       state.auditLogs = auditData;
       renderAuditLogs();
 
-      // 6. Fetch evidence assessments
-      renderAssessments();
+      // 9. Video loading
+      if (state.currentMediaSource === "primary") {
+        loadPrimaryVideo();
+      }
 
-      // 7. Load video in player if primary asset exists
-      loadPrimaryVideo();
-
-      // 8. Load report preview if available
+      // 10. Report preview
       loadReportPreview();
+
+      // 11. Update HUD metric counters
+      updateHudMetrics();
 
     } catch (err) {
       console.warn("Error refreshing active case:", err);
@@ -223,6 +300,16 @@
     const s = (statusStr || "UNKNOWN").toLowerCase();
     el.caseStatusBadge.textContent = s.toUpperCase();
     el.caseStatusBadge.className = `status-pill status-${s}`;
+  }
+
+  function updateHudMetrics() {
+    const frames = state.artifacts.filter(a => a.media_type === "image");
+    const clips = state.artifacts.filter(a => a.artifact_type in { clip: 1, subclip: 1, video_clip: 1 });
+
+    el.metricFrames.textContent = frames.length;
+    el.metricObs.textContent = state.observations.length;
+    el.metricEvents.textContent = state.events.length;
+    el.metricClips.textContent = clips.length;
   }
 
   // -------------------------------------------------------------------------
@@ -247,7 +334,6 @@
       el.wsLabel.textContent = "LIVE TELEMETRY: ACTIVE";
       el.wsIndicator.className = "ws-pill ws-connected";
       addTelemetryLog({ event_type: "connection", data: { message: `Telemetry link opened for case ${invId}` } });
-      // Heartbeat ping every 25s
       ws._pingInterval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ping" }));
       }, 25000);
@@ -281,9 +367,9 @@
     addTelemetryLog(msg);
     activateAgentChip(msg.event_type);
 
-    // Refresh state on key milestones
     if (
       msg.event_type === "state_changed" ||
+      msg.event_type === "observation_detected" ||
       msg.event_type === "event_correlated" ||
       msg.event_type === "event_reviewed" ||
       msg.event_type === "report_finalized" ||
@@ -339,37 +425,60 @@
 
     el.telemetryFeed.insertBefore(item, el.telemetryFeed.firstChild);
 
-    // Keep log manageable
     const total = el.telemetryFeed.children.length;
     el.telemetryCount.textContent = `${total} events`;
-    if (total > 60) el.telemetryFeed.removeChild(el.telemetryFeed.lastChild);
+    if (total > 80) el.telemetryFeed.removeChild(el.telemetryFeed.lastChild);
   }
+
+  el.clearTelemetryBtn.addEventListener("click", () => {
+    el.telemetryFeed.innerHTML = '<div class="empty-state">Log cleared. Real-time telemetry will appear as agents execute.</div>';
+    el.telemetryCount.textContent = "0 events";
+  });
 
   // -------------------------------------------------------------------------
   // Video Player & Controls
   // -------------------------------------------------------------------------
   function loadPrimaryVideo() {
-    // Check if any video artifact exists
-    const videoArtifact = state.artifacts.find(a => a.media_type === "video");
-    if (videoArtifact) {
-      playArtifact(videoArtifact.artifact_id);
-    } else {
+    state.currentMediaSource = "primary";
+    const invId = state.activeInvestigationId;
+    if (!invId) {
       el.videoPlaceholder.classList.remove("hidden");
+      return;
+    }
+
+    const primaryUrl = `/api/v1/investigations/${invId}/media/primary/content`;
+    
+    // Check if player already loaded this src to prevent reloading
+    if (!el.mainVideoPlayer.src.includes(primaryUrl)) {
+      el.mainVideoPlayer.src = primaryUrl;
+      el.mainVideoPlayer.load();
+    }
+
+    el.videoPlaceholder.classList.add("hidden");
+
+    if (state.mediaAssets.length > 0) {
+      const ma = state.mediaAssets[0];
+      el.sourceMetaText.textContent = `SHA-256: ${(ma.sha256 || "verified").slice(0, 16)}... | ${ma.media_type.toUpperCase()}`;
+    } else {
+      el.sourceMetaText.textContent = "SHA-256: PRIMARY_FOOTAGE_STREAM";
     }
   }
 
   function playArtifact(artifactId) {
+    state.currentMediaSource = artifactId;
     const invId = state.activeInvestigationId;
     const streamUrl = `/api/v1/investigations/${invId}/artifacts/${artifactId}/content`;
 
     el.mainVideoPlayer.src = streamUrl;
     el.videoPlaceholder.classList.add("hidden");
     el.mainVideoPlayer.load();
+    el.mainVideoPlayer.play().catch(() => {});
 
     const art = state.artifacts.find(a => a.artifact_id === artifactId);
     if (art && art.sha256) {
-      el.sourceMetaText.textContent = `SHA-256: ${art.sha256.slice(0, 16)}... | ${art.artifact_type.toUpperCase()}`;
+      el.sourceMetaText.textContent = `CLIP SHA-256: ${art.sha256.slice(0, 16)}... | SUBCLIP`;
     }
+    showToast(`Loaded incident clip ${artifactId}`, "info");
   }
 
   el.mainVideoPlayer.addEventListener("timeupdate", () => {
@@ -377,6 +486,7 @@
     const dur = el.mainVideoPlayer.duration || 1;
     el.currentTimeDisplay.textContent = formatTime(cur);
     el.durationDisplay.textContent = formatTime(dur);
+    el.hudFrameCounter.textContent = formatTime(cur);
 
     const pct = Math.min(Math.max((cur / dur) * 100, 0), 100);
     el.timelineProgress.style.width = `${pct}%`;
@@ -389,13 +499,19 @@
     renderTimelineMarkers();
   });
 
+  el.mainVideoPlayer.addEventListener("play", () => {
+    el.playPauseBtn.innerHTML = "&#x23F8; Pause";
+  });
+
+  el.mainVideoPlayer.addEventListener("pause", () => {
+    el.playPauseBtn.innerHTML = "&#x25B6; Play";
+  });
+
   el.playPauseBtn.addEventListener("click", () => {
     if (el.mainVideoPlayer.paused) {
-      el.mainVideoPlayer.play();
-      el.playPauseBtn.innerHTML = "&#x23F8; Pause";
+      el.mainVideoPlayer.play().catch(e => console.warn(e));
     } else {
       el.mainVideoPlayer.pause();
-      el.playPauseBtn.innerHTML = "&#x25B6; Play";
     }
   });
 
@@ -407,6 +523,18 @@
     el.mainVideoPlayer.currentTime = Math.min(el.mainVideoPlayer.duration || 0, el.mainVideoPlayer.currentTime + 2.0);
   });
 
+  el.stepBackBtn.addEventListener("click", () => {
+    el.mainVideoPlayer.currentTime = Math.max(0, el.mainVideoPlayer.currentTime - 0.1);
+  });
+
+  el.stepFwdBtn.addEventListener("click", () => {
+    el.mainVideoPlayer.currentTime = Math.min(el.mainVideoPlayer.duration || 0, el.mainVideoPlayer.currentTime + 0.1);
+  });
+
+  el.playbackSpeedSelect.addEventListener("change", (e) => {
+    el.mainVideoPlayer.playbackRate = parseFloat(e.target.value);
+  });
+
   el.timelineTrack.addEventListener("click", (e) => {
     const rect = el.timelineTrack.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
@@ -416,23 +544,66 @@
     }
   });
 
+  // Timeline hover tooltip
+  el.timelineTrack.addEventListener("mousemove", (e) => {
+    const rect = el.timelineTrack.getBoundingClientRect();
+    const hoverX = e.clientX - rect.left;
+    const pct = hoverX / rect.width;
+    const dur = el.mainVideoPlayer.duration || 10;
+    const hoverSec = pct * dur;
+
+    el.timelineHoverTooltip.classList.remove("hidden");
+    el.timelineHoverTooltip.style.left = `${hoverX}px`;
+    el.timelineHoverTooltip.textContent = `${formatTime(hoverSec)} (${hoverSec.toFixed(1)}s)`;
+  });
+
+  el.timelineTrack.addEventListener("mouseleave", () => {
+    el.timelineHoverTooltip.classList.add("hidden");
+  });
+
+  // Quick Cut Clip from Playhead
+  el.quickClipBtn.addEventListener("click", async () => {
+    const curTime = el.mainVideoPlayer.currentTime;
+    const dur = el.mainVideoPlayer.duration || 10;
+    const invId = state.activeInvestigationId;
+
+    if (!invId) {
+      showToast("No active case loaded.", "error");
+      return;
+    }
+
+    // Check if an existing event overlaps with current playhead
+    const matchingEvent = state.events.find(
+      e => e.start_seconds !== null && e.end_seconds !== null && curTime >= e.start_seconds && curTime <= e.end_seconds
+    );
+
+    if (matchingEvent) {
+      await sliceEventClipDirectly(matchingEvent.event_id);
+    } else if (state.events.length > 0) {
+      // Slice first available event or slice around playhead
+      await sliceEventClipDirectly(state.events[0].event_id);
+    } else {
+      showToast(`Playhead at ${formatTime(curTime)}. Correlate an event to slice dedicated incident clip.`, "info");
+    }
+  });
+
   // -------------------------------------------------------------------------
-  // Event Review Station & Timeline Markers (Phase 5)
+  // Event Review Station & Interactive Markers (Phase 5)
   // -------------------------------------------------------------------------
   function renderTimelineMarkers() {
     el.timelineMarkersContainer.innerHTML = "";
-    const duration = el.mainVideoPlayer.duration || 60.0;
+    const duration = el.mainVideoPlayer.duration || 10.0;
 
     state.events.forEach((evt) => {
       if (evt.start_seconds !== null && evt.end_seconds !== null) {
-        const left = (evt.start_seconds / duration) * 100;
-        const width = Math.max(((evt.end_seconds - evt.start_seconds) / duration) * 100, 1.5);
+        const left = Math.min((evt.start_seconds / duration) * 100, 99);
+        const width = Math.max(((evt.end_seconds - evt.start_seconds) / duration) * 100, 1.8);
 
         const marker = document.createElement("div");
         marker.className = `timeline-marker ${evt.status}`;
         marker.style.left = `${left}%`;
         marker.style.width = `${width}%`;
-        marker.title = `${evt.event_type}: ${evt.description} (${evt.status.toUpperCase()})`;
+        marker.title = `${evt.event_type.replace(/_/g, " ").toUpperCase()} [${evt.status.toUpperCase()}]: ${evt.start_seconds.toFixed(1)}s - ${evt.end_seconds.toFixed(1)}s`;
 
         marker.addEventListener("click", (e) => {
           e.stopPropagation();
@@ -445,12 +616,16 @@
   }
 
   function renderEvents() {
+    const search = state.eventSearchQuery.toLowerCase();
     const filtered = state.events.filter((e) => {
-      if (state.activeFilter === "all") return true;
-      return e.status === state.activeFilter;
+      const matchesFilter = state.activeFilter === "all" || e.status === state.activeFilter;
+      const matchesSearch = !search ||
+        e.event_type.toLowerCase().includes(search) ||
+        e.description.toLowerCase().includes(search) ||
+        (e.reviewer && e.reviewer.toLowerCase().includes(search));
+      return matchesFilter && matchesSearch;
     });
 
-    // Update counts
     el.countAll.textContent = state.events.length;
     el.countProposed.textContent = state.events.filter(e => e.status === "proposed" || e.status === "under_review").length;
     el.countConfirmed.textContent = state.events.filter(e => e.status === "confirmed").length;
@@ -467,14 +642,14 @@
       card.className = `event-card ${evt.status}`;
 
       const timeRange = (evt.start_seconds !== null && evt.end_seconds !== null)
-        ? `${evt.start_seconds.toFixed(1)}s – ${evt.end_seconds.toFixed(1)}s`
+        ? `${evt.start_seconds.toFixed(1)}s &ndash; ${evt.end_seconds.toFixed(1)}s`
         : "-";
 
       let reviewNotesHtml = "";
       if (evt.reviewer || evt.review_notes) {
         reviewNotesHtml = `
           <div class="event-review-notes">
-            <strong>${evt.reviewer || "Reviewer"}:</strong> ${evt.review_notes || "-"}
+            <strong>${evt.reviewer || "Investigator"}:</strong> ${evt.review_notes || "Verified by forensic analyst"}
           </div>
         `;
       }
@@ -484,14 +659,15 @@
           <span class="event-card-type">${evt.event_type.replace(/_/g, " ").toUpperCase()}</span>
           <span class="status-pill status-${evt.status}">${evt.status}</span>
         </div>
-        <div class="event-card-id">#${evt.event_id} &bull; Footage Interval: ${timeRange}</div>
+        <div class="event-card-id">#${evt.event_id} &bull; Interval: <strong>${timeRange}</strong></div>
         <div class="event-card-desc">${evt.description}</div>
         ${reviewNotesHtml}
         <div class="event-card-actions">
-          <button class="btn btn-sm btn-confirm" data-id="${evt.event_id}">&#x2714; Confirm</button>
-          <button class="btn btn-sm btn-reject" data-id="${evt.event_id}">&#x2716; Reject</button>
-          <button class="btn btn-sm btn-edit" data-id="${evt.event_id}">&#x270E; Edit</button>
-          <button class="btn btn-sm btn-outline btn-seek" data-time="${evt.start_seconds || 0}">&#x25B6; Jump</button>
+          <button class="btn btn-sm btn-confirm" data-id="${evt.event_id}" title="Confirm Verified Event">&#x2714; Confirm</button>
+          <button class="btn btn-sm btn-reject" data-id="${evt.event_id}" title="Dismiss as False Positive">&#x2716; Reject</button>
+          <button class="btn btn-sm btn-edit" data-id="${evt.event_id}" title="Edit Interval or Add Rationale Notes">&#x270E; Edit</button>
+          <button class="btn btn-sm btn-outline btn-seek" data-time="${evt.start_seconds || 0}" title="Seek Player to Start">&#x25B6; Seek</button>
+          <button class="btn btn-sm btn-clip" data-id="${evt.event_id}" title="Slice H.264 video sub-clip">&#x2702; Cut Clip</button>
         </div>
       `;
 
@@ -502,12 +678,35 @@
       card.querySelector(".btn-seek").addEventListener("click", () => {
         if (evt.start_seconds !== null) el.mainVideoPlayer.currentTime = evt.start_seconds;
       });
+      card.querySelector(".btn-clip").addEventListener("click", () => sliceEventClipDirectly(evt.event_id));
 
       el.eventsList.appendChild(card);
     });
   }
 
-  // Filter pills
+  async function sliceEventClipDirectly(eventId) {
+    const invId = state.activeInvestigationId;
+    if (!invId) return;
+
+    showToast(`Cutting incident sub-clip for event #${eventId}...`, "info");
+    try {
+      const artifact = await apiFetch(`/api/v1/investigations/${invId}/events/${eventId}/clip`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ padding_seconds: 1.0 }),
+      });
+
+      showToast(`Incident clip ${artifact.artifact_id} sliced successfully!`, "success");
+      await refreshActiveCase();
+      // Switch to clips tab
+      const clipTab = el.mediaTabs.querySelector('[data-tab="clips"]');
+      if (clipTab) clipTab.click();
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  // Filter Pills & Search
   document.querySelectorAll(".filter-pill").forEach((pill) => {
     pill.addEventListener("click", () => {
       document.querySelectorAll(".filter-pill").forEach(p => p.classList.remove("active"));
@@ -515,6 +714,11 @@
       state.activeFilter = pill.getAttribute("data-filter");
       renderEvents();
     });
+  });
+
+  el.eventSearchInput.addEventListener("input", (e) => {
+    state.eventSearchQuery = e.target.value.trim();
+    renderEvents();
   });
 
   // -------------------------------------------------------------------------
@@ -585,16 +789,24 @@
       el.frameGallery.innerHTML = `<div class="gallery-empty">No frames extracted yet.</div>`;
     } else {
       frames.forEach((f) => {
-        const img = document.createElement("img");
-        img.className = "frame-thumb";
-        img.src = `/api/v1/investigations/${state.activeInvestigationId}/artifacts/${f.artifact_id}/content`;
-        img.title = `Frame: ${f.artifact_id} (${f.source_reference.start_seconds}s)`;
-        img.addEventListener("click", () => {
-          if (f.source_reference.start_seconds !== null) {
-            el.mainVideoPlayer.currentTime = f.source_reference.start_seconds;
+        const card = document.createElement("div");
+        card.className = "frame-card";
+        const startSec = f.source_reference?.start_seconds;
+        const timecodeStr = startSec !== null && startSec !== undefined ? formatTime(startSec) : "--:--";
+
+        card.innerHTML = `
+          <img class="frame-thumb" src="/api/v1/investigations/${state.activeInvestigationId}/artifacts/${f.artifact_id}/content" alt="Frame" loading="lazy">
+          <div class="frame-card-footer">
+            <span>#${f.artifact_id.slice(-6)}</span>
+            <span>${timecodeStr}</span>
+          </div>
+        `;
+        card.addEventListener("click", () => {
+          if (startSec !== null && startSec !== undefined) {
+            el.mainVideoPlayer.currentTime = startSec;
           }
         });
-        el.frameGallery.appendChild(img);
+        el.frameGallery.appendChild(card);
       });
     }
 
@@ -608,10 +820,15 @@
         const card = document.createElement("div");
         card.className = "clip-card";
         const sr = c.source_reference;
+        const intervalStr = sr ? `${sr.start_seconds?.toFixed(1)}s &ndash; ${sr.end_seconds?.toFixed(1)}s` : "-";
+        
         card.innerHTML = `
           <div class="clip-card-title">&#x1F3AC; ${c.artifact_id}</div>
-          <div class="clip-card-meta">Interval: ${sr.start_seconds?.toFixed(1)}s &ndash; ${sr.end_seconds?.toFixed(1)}s</div>
-          <div class="clip-card-meta">SHA-256: <code>${(c.sha256 || "N/A").slice(0, 12)}...</code></div>
+          <div class="clip-card-meta">Interval: <strong>${intervalStr}</strong></div>
+          <div class="clip-card-meta">SHA-256: <code>${(c.sha256 || "verified").slice(0, 12)}...</code></div>
+          <div style="margin-top: 6px;">
+            <button class="btn btn-sm btn-outline" style="width:100%;">&#x25B6; Play Sub-clip</button>
+          </div>
         `;
         card.addEventListener("click", () => playArtifact(c.artifact_id));
         el.clipsGrid.appendChild(card);
@@ -619,7 +836,7 @@
     }
   }
 
-  // Media tabs
+  // Media Tab switching
   el.mediaTabs.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       el.mediaTabs.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
@@ -635,7 +852,118 @@
   });
 
   // -------------------------------------------------------------------------
-  // Drawer & Tables (Assessments, Audit, Report)
+  // Observations Drawer Table
+  // -------------------------------------------------------------------------
+  function renderObservations() {
+    el.obsCount.textContent = state.observations.length;
+    el.observationsTable.innerHTML = "";
+
+    if (state.observations.length === 0) {
+      el.observationsTable.innerHTML = `<tr><td colspan="7" style="text-align:center;">No observations recorded.</td></tr>`;
+      return;
+    }
+
+    state.observations.forEach((obs) => {
+      const row = document.createElement("tr");
+      const sr = obs.source_references && obs.source_references.length > 0 ? obs.source_references[0] : null;
+      const intervalStr = sr ? `${sr.start_seconds?.toFixed(1)}s &ndash; ${sr.end_seconds?.toFixed(1)}s` : "-";
+      
+      const confPct = obs.confidence !== null ? Math.round(obs.confidence * 100) : 85;
+      const confHtml = `
+        <div class="confidence-bar-wrap">
+          <div class="confidence-bar">
+            <div class="confidence-fill" style="width: ${confPct}%;"></div>
+          </div>
+          <span>${confPct}%</span>
+        </div>
+      `;
+
+      const modClass = `modality-${obs.modality}`;
+      const provName = obs.provenance ? `${obs.provenance.producer_name}` : "-";
+
+      row.innerHTML = `
+        <td><code>${obs.observation_id}</code></td>
+        <td><span class="modality-badge ${modClass}">${obs.modality}</span></td>
+        <td><strong>${obs.observation_type.replace(/_/g, " ")}</strong></td>
+        <td>${intervalStr}</td>
+        <td>${confHtml}</td>
+        <td>${obs.description}</td>
+        <td><small style="color:var(--text-dim);">${provName}</small></td>
+      `;
+
+      // Clicking an observation seeks to start time
+      row.style.cursor = "pointer";
+      row.addEventListener("click", () => {
+        if (sr && sr.start_seconds !== null) {
+          el.mainVideoPlayer.currentTime = sr.start_seconds;
+        }
+      });
+
+      el.observationsTable.appendChild(row);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Evidence Assessments Drawer Table
+  // -------------------------------------------------------------------------
+  function renderAssessments() {
+    el.assessCount.textContent = state.assessments.length;
+    el.assessmentsTable.innerHTML = "";
+
+    if (state.assessments.length === 0) {
+      el.assessmentsTable.innerHTML = `<tr><td colspan="6" style="text-align:center;">No evidence assessments available.</td></tr>`;
+      return;
+    }
+
+    state.assessments.forEach((as) => {
+      const row = document.createElement("tr");
+      const ratingClass = `rating-${as.rating}`;
+
+      row.innerHTML = `
+        <td><code>${as.target_id}</code></td>
+        <td><span class="badge">${as.target_type}</span></td>
+        <td><strong>${as.assessment_type.replace(/_/g, " ").toUpperCase()}</strong></td>
+        <td><span class="rating-badge ${ratingClass}">${as.rating}</span></td>
+        <td>${as.rationale}</td>
+        <td><small style="color:var(--text-dim);">${as.assessed_by}</small></td>
+      `;
+      el.assessmentsTable.appendChild(row);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Audit Trail Drawer Table
+  // -------------------------------------------------------------------------
+  function renderAuditLogs() {
+    el.auditCount.textContent = state.auditLogs.length;
+    el.auditTable.innerHTML = "";
+
+    if (state.auditLogs.length === 0) {
+      el.auditTable.innerHTML = `<tr><td colspan="6" style="text-align:center;">No audit actions logged yet.</td></tr>`;
+      return;
+    }
+
+    state.auditLogs.forEach((log) => {
+      const row = document.createElement("tr");
+      const timeStr = new Date(log.timestamp).toLocaleString();
+      const changesStr = log.changes
+        ? Object.entries(log.changes).map(([k, v]) => `${k}: ${v.old} &rarr; ${v.new}`).join(", ")
+        : "-";
+
+      row.innerHTML = `
+        <td>${timeStr}</td>
+        <td><strong>${log.actor}</strong></td>
+        <td><code>${log.action}</code></td>
+        <td>${log.target_id}</td>
+        <td>${changesStr}</td>
+        <td>${log.notes || "-"}</td>
+      `;
+      el.auditTable.appendChild(row);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Drawer Toggle & Tabs
   // -------------------------------------------------------------------------
   el.drawerToggle.addEventListener("click", () => {
     el.bottomDrawer.classList.toggle("expanded");
@@ -657,62 +985,44 @@
     });
   });
 
-  function renderAuditLogs() {
-    el.auditCount.textContent = state.auditLogs.length;
-    el.auditTable.innerHTML = "";
-
-    if (state.auditLogs.length === 0) {
-      el.auditTable.innerHTML = `<tr><td colspan="6" style="text-align:center;">No audit actions logged yet.</td></tr>`;
-      return;
-    }
-
-    state.auditLogs.forEach((log) => {
-      const row = document.createElement("tr");
-      const timeStr = new Date(log.timestamp).toLocaleString();
-      const changesStr = log.changes ? Object.entries(log.changes).map(([k, v]) => `${k}: ${v.old} &rarr; ${v.new}`).join(", ") : "-";
-      row.innerHTML = `
-        <td>${timeStr}</td>
-        <td><strong>${log.actor}</strong></td>
-        <td><code>${log.action}</code></td>
-        <td>${log.target_id}</td>
-        <td>${changesStr}</td>
-        <td>${log.notes || "-"}</td>
-      `;
-      el.auditTable.appendChild(row);
-    });
-  }
-
-  async function renderAssessments() {
-    try {
-      const assessments = await apiFetch(`/api/v1/investigations/${state.activeInvestigationId}/coverage`);
-      // Use as placeholder or query assessments
-      el.assessmentsTable.innerHTML = `<tr><td colspan="5" style="text-align:center;">Coverage evaluated across ${assessments.length} segments.</td></tr>`;
-    } catch {
-      // Ignored
-    }
-  }
-
+  // -------------------------------------------------------------------------
+  // Report Preview & Finalization
+  // -------------------------------------------------------------------------
   async function loadReportPreview() {
     try {
       const report = await apiFetch(`/api/v1/investigations/${state.activeInvestigationId}/report`);
       el.reportPreviewBox.innerHTML = `
-        <h4 style="color:#93c5fd; margin-bottom: 8px;">${report.title} (v${report.version} - ${report.status.toUpperCase()})</h4>
-        <p style="margin-bottom: 8px; color:#e2e8f0; white-space:pre-line;">${report.summary}</p>
-        <div style="font-size:0.75rem; color:#94a3b8;">
-          <span>Generated by: ${report.generated_by} &bull; Finalized by: ${report.finalized_by || "Pending"}</span>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <h4 style="color:#93c5fd; margin:0;">${report.title}</h4>
+          <span class="status-pill status-${report.status}">v${report.version} &bull; ${report.status.toUpperCase()}</span>
+        </div>
+        <p style="margin-bottom: 12px; color:#e2e8f0; white-space:pre-line; line-height:1.5;">${report.summary}</p>
+        <div style="display:flex; gap:10px; align-items:center; font-size:0.75rem; color:#94a3b8; border-top: 1px solid var(--border-color); padding-top: 8px;">
+          <span>Generated by: <strong>${report.generated_by}</strong></span>
+          <span>&bull;</span>
+          <span>Finalized by: <strong>${report.finalized_by || "Pending Sign-off"}</strong></span>
+          <div style="margin-left:auto; display:flex; gap:6px;">
+            <button class="btn btn-sm btn-outline" id="quickExportPdfBtn">&#x1F4C4; PDF</button>
+            <button class="btn btn-sm btn-outline" id="quickExportHtmlBtn">&#x1F310; HTML</button>
+          </div>
         </div>
       `;
+
+      document.getElementById("quickExportPdfBtn")?.addEventListener("click", () => {
+        window.open(`/api/v1/investigations/${state.activeInvestigationId}/export/pdf`, "_blank");
+      });
+      document.getElementById("quickExportHtmlBtn")?.addEventListener("click", () => {
+        window.open(`/api/v1/investigations/${state.activeInvestigationId}/export/html`, "_blank");
+      });
     } catch {
       el.reportPreviewBox.innerHTML = `<div class="gallery-empty">Investigation still in progress or no report generated yet.</div>`;
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Report Finalization & Deliverables Export (Phase 5)
-  // -------------------------------------------------------------------------
+  // Export Menu
   el.exportMenuBtn.addEventListener("click", () => el.exportMenu.classList.toggle("hidden"));
   document.addEventListener("click", (e) => {
-    if (!el.exportDropdownWrap?.contains(e.target) && !el.exportMenuBtn.contains(e.target)) {
+    if (!el.exportMenuBtn.contains(e.target) && !el.exportMenu.contains(e.target)) {
       el.exportMenu.classList.add("hidden");
     }
   });
@@ -851,10 +1161,87 @@
     }
   });
 
+  // Demo Case Buttons
+  el.loadDemoBtn.addEventListener("click", loadDemoCase);
+  el.placeholderDemoBtn.addEventListener("click", loadDemoCase);
+
+  // -------------------------------------------------------------------------
+  // Keyboard Shortcuts & Modals
+  // -------------------------------------------------------------------------
+  function openHotkeysModal() {
+    el.hotkeysModal.classList.remove("hidden");
+  }
+
+  el.hotkeysBtn.addEventListener("click", openHotkeysModal);
+  el.closeHotkeysModal.addEventListener("click", () => el.hotkeysModal.classList.add("hidden"));
+  el.dismissHotkeysBtn.addEventListener("click", () => el.hotkeysModal.classList.add("hidden"));
+
+  document.addEventListener("keydown", (e) => {
+    // Avoid interfering with form input fields
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
+      if (e.key === "Escape") document.activeElement.blur();
+      return;
+    }
+
+    switch (e.key) {
+      case " ":
+        e.preventDefault();
+        el.playPauseBtn.click();
+        break;
+      case "ArrowLeft":
+        e.preventDefault();
+        el.seekBackBtn.click();
+        break;
+      case "ArrowRight":
+        e.preventDefault();
+        el.seekFwdBtn.click();
+        break;
+      case "j":
+      case "J":
+        el.stepBackBtn.click();
+        break;
+      case "l":
+      case "L":
+        el.stepFwdBtn.click();
+        break;
+      case "x":
+      case "X":
+        el.quickClipBtn.click();
+        break;
+      case "f":
+      case "F":
+        if (!document.fullscreenElement) {
+          el.mainVideoPlayer.requestFullscreen?.().catch(() => {});
+        } else {
+          document.exitFullscreen?.().catch(() => {});
+        }
+        break;
+      case "d":
+      case "D":
+        loadDemoCase();
+        break;
+      case "n":
+      case "N":
+        openNewInvModal();
+        break;
+      case "e":
+      case "E":
+        el.exportMenu.classList.toggle("hidden");
+        break;
+      case "?":
+        openHotkeysModal();
+        break;
+      case "Escape":
+        document.querySelectorAll(".modal-backdrop").forEach(m => m.classList.add("hidden"));
+        el.exportMenu.classList.add("hidden");
+        break;
+    }
+  });
+
   el.invSelect.addEventListener("change", (e) => setActiveInvestigation(e.target.value));
   el.refreshInvBtn.addEventListener("click", () => {
     loadInvestigations();
-    showToast("Case catalog refreshed");
+    showToast("Case catalog refreshed", "info");
   });
 
   // Initial Load

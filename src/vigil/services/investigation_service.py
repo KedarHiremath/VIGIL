@@ -17,8 +17,11 @@ from vigil.domain.artifact import Artifact
 from vigil.domain.audit import AuditLog
 from vigil.domain.coverage import CoverageRecord
 from vigil.domain.event import Event
+from vigil.domain.evidence_assessment import EvidenceAssessment
 from vigil.domain.investigation import Investigation
+from vigil.domain.media_asset import MediaAsset
 from vigil.domain.observation import Observation
+from vigil.domain.provenance import Provenance
 from vigil.domain.report import Report
 from vigil.domain.source_reference import SourceReference
 from vigil.media.ingestion import IngestionResult, MediaIngestionService
@@ -721,3 +724,284 @@ class InvestigationService:
         """Resolve artifact local disk path if it exists."""
         artifact = self.repository.get_artifact(artifact_id)
         return _uri_to_local_path(artifact.storage_uri)
+
+
+    def get_media_assets(self, investigation_id: str) -> list[MediaAsset]:
+        """Retrieve media assets associated with an investigation."""
+        inv = self.get_investigation(investigation_id)
+        all_assets = {m.media_asset_id: m for m in self.repository.list_media_assets()}
+        return [all_assets[mid] for mid in inv.media_asset_ids if mid in all_assets]
+
+    def get_media_asset_content_path(self, media_asset_id: str) -> Path | None:
+        """Resolve media asset local disk path if it exists."""
+        media_asset = self.repository.get_media_asset(media_asset_id)
+        return _uri_to_local_path(media_asset.storage_uri)
+
+    def get_evidence_assessments(self, investigation_id: str) -> list[EvidenceAssessment]:
+        """Retrieve evidence assessments related to an investigation."""
+        self.get_investigation(investigation_id)
+        events = self.get_events(investigation_id)
+        obs = self.get_observations(investigation_id)
+        target_ids = {e.event_id for e in events} | {o.observation_id for o in obs}
+        all_assessments = self.repository.list_evidence_assessments()
+        filtered = [a for a in all_assessments if a.target_id in target_ids]
+        return filtered if filtered or not all_assessments else all_assessments
+
+    def create_demo_investigation(self) -> tuple[Investigation, IngestionResult]:
+        """Seed a realistic forensic investigation with synthetic footage, frames, observations, and events."""
+        import math
+
+        import av
+        import numpy as np
+
+        demo_dir = self.storage_dir / "demo"
+        demo_dir.mkdir(parents=True, exist_ok=True)
+        video_path = demo_dir / "demo_perimeter_feed.mp4"
+
+        # Generate 6-second surveillance footage with timecode and crosshairs
+        fps = 24
+        duration_seconds = 6.0
+        width = 640
+        height = 360
+        total_frames = int(duration_seconds * fps)
+
+        with av.open(str(video_path), mode="w", format="mp4") as container:
+            v_stream = container.add_stream("h264", rate=fps)
+            v_stream.width = width
+            v_stream.height = height
+            v_stream.pix_fmt = "yuv420p"
+
+            a_stream = None
+            try:
+                a_stream = container.add_stream("aac", rate=44100)
+                a_stream.format = "fltp"
+                a_stream.layout = "stereo"
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+            for i in range(total_frames):
+                t_sec = i / fps
+                img = np.zeros((height, width, 3), dtype=np.uint8)
+                # CCTV dark night surveillance aesthetic
+                img[:, :, :] = 18
+                # Ground grid lines
+                for y in range(180, height, 30):
+                    img[y, :, :] = 35
+                for x in range(0, width, 50):
+                    img[180:, x, :] = 35
+
+                # Security perimeter fence line (yellow/amber warning stripe)
+                img[175:180, :, 0] = 0
+                img[175:180, :, 1] = 180
+                img[175:180, :, 2] = 230
+
+                # Simulated intruder moving between t=1.0s and t=4.5s
+                if 1.0 <= t_sec <= 4.5:
+                    prog = (t_sec - 1.0) / 3.5
+                    px = int(120 + prog * 400)
+                    py = int(160 - math.sin(prog * math.pi) * 20)
+                    img[py:py+50, px:px+20, 0] = 220
+                    img[py:py+50, px:px+20, 1] = 220
+                    img[py:py+50, px:px+20, 2] = 220
+
+                frame = av.VideoFrame.from_ndarray(img, format="bgr24")
+                for packet in v_stream.encode(frame):
+                    container.mux(packet)
+
+            if a_stream is not None:
+                num_samples = int(duration_seconds * 44100)
+                t = np.linspace(0, duration_seconds, num_samples, dtype=np.float32)
+                rumble = np.sin(2 * math.pi * 60 * t) * 0.1
+                alert = np.where((t >= 2.4) & (t <= 2.9), np.sin(2 * math.pi * 880 * t) * 0.4, 0.0)
+                audio = (rumble + alert).astype(np.float32)
+                stereo = np.stack([audio, audio])
+                a_frame = av.AudioFrame.from_ndarray(stereo, format="fltp", layout="stereo")
+                a_frame.rate = 44100
+                for packet in a_stream.encode(a_frame):
+                    container.mux(packet)
+                for packet in a_stream.encode():
+                    container.mux(packet)
+
+            for packet in v_stream.encode():
+                container.mux(packet)
+
+        # Ingest the generated video
+        inv_id = f"inv-demo-{uuid.uuid4().hex[:6]}"
+        inv, result = self.create_and_ingest_investigation(
+            file_path=video_path,
+            investigation_id=inv_id,
+            title="Operation Nightwatch: North Perimeter Intrusion Analysis",
+            objective="Identify unauthorized boundary breaches, classify acoustic anomalies, and correlate suspect trajectory.",
+            scope_description="Continuous PTZ surveillance footage from North Gate Sector 4",
+            camera_id="cam-north-04",
+            camera_name="North Perimeter PTZ Cam 04",
+            camera_location="Perimeter Sector 4 (North Border)",
+            camera_timezone="UTC",
+            sample_interval_seconds=1.0,
+            max_frames=6,
+            extract_audio=True,
+            created_by="Lead Det. Vance",
+        )
+
+        prov_vis = Provenance(
+            producer_type="vision_model",
+            producer_name="YOLOv8x-Forensic",
+            method="object_detection",
+        )
+        prov_aud = Provenance(
+            producer_type="audio_model",
+            producer_name="Whisper-Acoustic-V3",
+            method="audio_transcription",
+        )
+
+        src_ref1 = SourceReference(media_asset_id=result.media_asset.media_asset_id, start_seconds=1.2, end_seconds=2.6)
+        obs1 = Observation(
+            observation_id=f"obs-{uuid.uuid4().hex[:6]}",
+            modality="video",
+            observation_type="person_detection",
+            description="Individual dressed in dark tactical gear approaching the perimeter boundary.",
+            source_references=[src_ref1],
+            confidence=0.96,
+            provenance=prov_vis,
+        )
+        self.repository.add_observation(obs1)
+
+        src_ref2 = SourceReference(media_asset_id=result.media_asset.media_asset_id, start_seconds=2.4, end_seconds=2.9)
+        obs2 = Observation(
+            observation_id=f"obs-{uuid.uuid4().hex[:6]}",
+            modality="audio",
+            observation_type="acoustic_transient",
+            description="High-frequency acoustic transient (880 Hz harmonic spike) matching gate latch tamper sound.",
+            source_references=[src_ref2],
+            confidence=0.89,
+            provenance=prov_aud,
+        )
+        self.repository.add_observation(obs2)
+
+        src_ref3 = SourceReference(media_asset_id=result.media_asset.media_asset_id, start_seconds=3.2, end_seconds=4.4)
+        obs3 = Observation(
+            observation_id=f"obs-{uuid.uuid4().hex[:6]}",
+            modality="video",
+            observation_type="motion_detected",
+            description="Rapid lateral traversal across marked yellow restricted security zone.",
+            source_references=[src_ref3],
+            confidence=0.93,
+            provenance=prov_vis,
+        )
+        self.repository.add_observation(obs3)
+
+        evt1 = Event(
+            event_id=f"evt-{uuid.uuid4().hex[:6]}",
+            event_type="restricted_boundary_crossing",
+            description="Subject crosses perimeter yellow line into restricted facility corridor.",
+            observation_ids=[obs1.observation_id, obs3.observation_id],
+            status="confirmed",
+            start_seconds=1.2,
+            end_seconds=3.5,
+            reviewer="Lead Det. Vance",
+            review_notes="Verified against ground boundary coordinates. Movement speed indicates deliberate penetration.",
+            reviewed_at=datetime.now(UTC),
+        )
+        self.repository.add_event(evt1)
+
+        evt2 = Event(
+            event_id=f"evt-{uuid.uuid4().hex[:6]}",
+            event_type="security_hardware_tamper",
+            description="Acoustic signature of manual gate lock vibration and hardware manipulation.",
+            observation_ids=[obs2.observation_id],
+            status="proposed",
+            start_seconds=2.3,
+            end_seconds=3.1,
+        )
+        self.repository.add_event(evt2)
+
+        evt3 = Event(
+            event_id=f"evt-{uuid.uuid4().hex[:6]}",
+            event_type="secondary_zone_incursion",
+            description="Subject sprints toward inner building entrance.",
+            observation_ids=[obs3.observation_id],
+            status="under_review",
+            start_seconds=3.6,
+            end_seconds=4.5,
+            reviewer="Analyst Chen",
+            review_notes="Cross-referencing with building interior door sensor logs.",
+            reviewed_at=datetime.now(UTC),
+        )
+        self.repository.add_event(evt3)
+
+        as1 = EvidenceAssessment(
+            assessment_id=f"assess-{uuid.uuid4().hex[:6]}",
+            target_type="event",
+            target_id=evt1.event_id,
+            assessment_type="evidence_quality",
+            rating="high",
+            rationale="Clear multi-frame visual detection with high confidence (0.96) and uninterrupted track.",
+            assessed_by="Automated Verification Agent",
+        )
+        as2 = EvidenceAssessment(
+            assessment_id=f"assess-{uuid.uuid4().hex[:6]}",
+            target_type="event",
+            target_id=evt2.event_id,
+            assessment_type="uncertainty",
+            rating="moderate",
+            rationale="Acoustic harmonic matches latch strike; however, physical contact is partially occluded.",
+            assessed_by="Temporal Correlator Agent",
+        )
+        as3 = EvidenceAssessment(
+            assessment_id=f"assess-{uuid.uuid4().hex[:6]}",
+            target_type="observation",
+            target_id=obs2.observation_id,
+            assessment_type="support_level",
+            rating="high",
+            rationale="Clean spectral peak at 880Hz with 18dB SNR over background rumble.",
+            assessed_by="Acoustic Signal Assessor",
+        )
+        self.repository.add_evidence_assessment(as1)
+        self.repository.add_evidence_assessment(as2)
+        self.repository.add_evidence_assessment(as3)
+
+        try:
+            self.slice_incident_clip(inv.investigation_id, evt1.event_id, padding_seconds=0.5)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Could not auto-slice demo clip: {exc}")
+
+        rep = Report(
+            report_id=f"rep-{uuid.uuid4().hex[:6]}",
+            investigation_id=inv.investigation_id,
+            title="Preliminary Forensic Report: North Perimeter Gate Breach",
+            summary=(
+                "Autonomous multi-modal forensic analysis confirms an unauthorized restricted boundary breach "
+                "at 00:01.20 - 00:03.50 into Sector 4 corridor. Acoustic telemetry detected simultaneous gate hardware "
+                "manipulation at 00:02.40. One incident sub-clip has been isolated and cryptographically indexed."
+            ),
+            observation_ids=[obs1.observation_id, obs2.observation_id, obs3.observation_id],
+            event_ids=[evt1.event_id, evt2.event_id, evt3.event_id],
+            assessment_ids=[as1.assessment_id, as2.assessment_id, as3.assessment_id],
+            generated_by="Agentic Reporter & Synthesizer",
+            version=1,
+            status="draft",
+        )
+        self.repository.add_report(rep)
+
+        st = InvestigationState(
+            investigation_id=inv.investigation_id,
+            status=InvestigationStatus.COMPLETED,
+            completed_at=datetime.now(UTC),
+            task_ids=["task-ingest", "task-visual", "task-audio", "task-temporal", "task-verify", "task-report"],
+            observation_ids=[obs1.observation_id, obs2.observation_id, obs3.observation_id],
+            event_ids=[evt1.event_id, evt2.event_id, evt3.event_id],
+        )
+        self.repository.save_state(st)
+
+        audit = AuditLog(
+            audit_id=f"audit-{uuid.uuid4().hex[:8]}",
+            investigation_id=inv.investigation_id,
+            action="investigation_update",
+            actor="Lead Det. Vance",
+            target_type="investigation",
+            target_id=inv.investigation_id,
+            notes="Demo case initialized with multi-modal forensic pipeline.",
+        )
+        self.repository.add_audit_log(audit)
+
+        return inv, result

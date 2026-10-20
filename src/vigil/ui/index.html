@@ -11,7 +11,7 @@
   <!-- Top Navigation Header -->
   <header class="navbar">
     <div class="nav-left">
-      <div class="brand">
+      <div class="brand" title="VIGIL Autonomous Video-Forensics System">
         <div class="brand-radar"></div>
         <span class="brand-name">VIGIL</span>
         <span class="brand-sub">FORENSIC SUITE</span>
@@ -24,6 +24,10 @@
         </select>
         <button id="refreshInvBtn" class="btn btn-icon" title="Refresh Cases">&#x21bb;</button>
       </div>
+
+      <button id="loadDemoBtn" class="btn btn-outline btn-sm demo-btn" title="Seed and load pre-configured realistic forensic case">
+        <span>&#x2728;</span> Demo Case
+      </button>
     </div>
 
     <div class="nav-center">
@@ -35,17 +39,22 @@
     </div>
 
     <div class="nav-right">
+      <button id="hotkeysBtn" class="btn btn-secondary btn-sm" title="Keyboard Shortcuts">
+        <span>&#x2328;</span> Keys
+      </button>
+
       <button id="newInvBtn" class="btn btn-primary">
         <span class="btn-icon-plus">+</span> Ingest Footage
       </button>
+
       <div class="export-dropdown-wrap">
         <button id="exportMenuBtn" class="btn btn-secondary">Export Deliverable &#x25BE;</button>
         <div id="exportMenu" class="dropdown-menu hidden">
-          <button id="exportPdfBtn" class="dropdown-item">Download PDF Report</button>
-          <button id="exportHtmlBtn" class="dropdown-item">Open HTML Report</button>
-          <button id="exportMdBtn" class="dropdown-item">View Markdown Summary</button>
+          <button id="exportPdfBtn" class="dropdown-item">&#x1F4C4; Download PDF Report</button>
+          <button id="exportHtmlBtn" class="dropdown-item">&#x1F310; Open HTML Report (Interactive)</button>
+          <button id="exportMdBtn" class="dropdown-item">&#x1F4DD; View Markdown Summary</button>
           <hr class="dropdown-sep">
-          <button id="finalizeReportBtn" class="dropdown-item finalize-item">Finalize &amp; Sign Case</button>
+          <button id="finalizeReportBtn" class="dropdown-item finalize-item">&#x1F50F; Finalize &amp; Sign Case</button>
         </div>
       </div>
     </div>
@@ -59,9 +68,13 @@
         <div class="panel-title">
           <span class="panel-icon">&#x1F4E1;</span> AGENT MISSION CONTROL
         </div>
-        <span id="telemetryCount" class="badge">0 events</span>
+        <div class="telemetry-header-actions">
+          <span id="telemetryCount" class="badge">0 events</span>
+          <button id="clearTelemetryBtn" class="btn btn-icon btn-tiny" title="Clear Event Log">&#x1F5D1;</button>
+        </div>
       </div>
 
+      <!-- Agent Status Roster -->
       <div class="agent-roster">
         <div class="agent-chip" id="chip-planner" title="Decomposes investigation objectives">
           <span class="agent-chip-dot"></span> Planner
@@ -83,8 +96,29 @@
         </div>
       </div>
 
+      <!-- Case Quick Metrics HUD -->
+      <div class="case-metrics-bar" id="caseMetricsBar">
+        <div class="metric-item">
+          <span class="metric-val" id="metricFrames">0</span>
+          <span class="metric-lbl">FRAMES</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-val" id="metricObs">0</span>
+          <span class="metric-lbl">OBSERVATIONS</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-val" id="metricEvents">0</span>
+          <span class="metric-lbl">EVENTS</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-val" id="metricClips">0</span>
+          <span class="metric-lbl">CLIPS</span>
+        </div>
+      </div>
+
+      <!-- Telemetry Stream Feed -->
       <div class="telemetry-feed" id="telemetryFeed">
-        <div class="empty-state">Select an active investigation or upload footage to monitor live agent actions.</div>
+        <div class="empty-state">Select an active investigation, ingest footage, or click "Demo Case" to monitor live forensic agents.</div>
       </div>
     </aside>
 
@@ -100,14 +134,21 @@
         </div>
       </div>
 
-      <div class="video-container">
-        <video id="mainVideoPlayer" controls preload="metadata">
+      <div class="video-container" id="videoContainer">
+        <video id="mainVideoPlayer" preload="metadata" playsinline>
           <p>Select video footage to review.</p>
         </video>
+        <div id="videoOverlayHud" class="video-hud-overlay">
+          <span id="hudCameraId" class="hud-tag">CAM: -</span>
+          <span id="hudFrameCounter" class="hud-tag hud-right">00:00.00</span>
+        </div>
         <div id="videoPlaceholder" class="video-placeholder">
           <div class="placeholder-icon">&#x1F39E;</div>
-          <p>No video loaded</p>
-          <button id="placeholderUploadBtn" class="btn btn-outline">Upload Video Footage</button>
+          <p>No video footage loaded</p>
+          <div class="placeholder-actions">
+            <button id="placeholderUploadBtn" class="btn btn-primary">Upload Video Footage</button>
+            <button id="placeholderDemoBtn" class="btn btn-secondary">&#x2728; Load Demo Case</button>
+          </div>
         </div>
       </div>
 
@@ -116,11 +157,27 @@
         <div class="timecode-display">
           <span id="currentTimeDisplay">00:00.00</span> / <span id="durationDisplay">00:00.00</span>
         </div>
+        
         <div class="seek-controls">
-          <button id="seekBackBtn" class="btn btn-sm btn-icon" title="Rewind 2s">&#x23EA; -2s</button>
-          <button id="playPauseBtn" class="btn btn-sm btn-icon" title="Play/Pause">&#x25B6; Play</button>
-          <button id="seekFwdBtn" class="btn btn-sm btn-icon" title="Forward 2s">&#x23E9; +2s</button>
+          <button id="seekBackBtn" class="btn btn-sm btn-icon" title="Rewind 2s (Left Arrow)">&#x23EA; -2s</button>
+          <button id="stepBackBtn" class="btn btn-sm btn-icon" title="Frame Step Backward 0.1s (J)">&#x23EE; Step</button>
+          <button id="playPauseBtn" class="btn btn-sm btn-primary" title="Play/Pause (Space)">&#x25B6; Play</button>
+          <button id="stepFwdBtn" class="btn btn-sm btn-icon" title="Frame Step Forward 0.1s (L)">Step &#x23ED;</button>
+          <button id="seekFwdBtn" class="btn btn-sm btn-icon" title="Forward 2s (Right Arrow)">+2s &#x23E9;</button>
+
+          <select id="playbackSpeedSelect" class="speed-select" title="Playback Speed">
+            <option value="0.25">0.25x</option>
+            <option value="0.5">0.5x</option>
+            <option value="1.0" selected>1.0x</option>
+            <option value="1.5">1.5x</option>
+            <option value="2.0">2.0x</option>
+          </select>
+
+          <button id="quickClipBtn" class="btn btn-sm btn-outline" title="Quick Cut Incident Clip around current playhead (-1s / +1s)">
+            &#x2702; Cut Clip
+          </button>
         </div>
+
         <div class="source-metadata" id="sourceMetaText">SHA-256: -</div>
       </div>
 
@@ -130,15 +187,19 @@
           <span>INVESTIGATION TIMELINE &amp; INCIDENT INTERVALS</span>
           <span id="timelineSpanLabel">0s &ndash; 0s</span>
         </div>
-        <div class="timeline-track" id="timelineTrack">
+        <div class="timeline-track" id="timelineTrack" title="Click to seek">
+          <div class="timeline-ticks" id="timelineTicks"></div>
           <div class="timeline-progress" id="timelineProgress"></div>
           <div id="timelineMarkersContainer"></div>
+          <div id="timelineHoverTooltip" class="timeline-tooltip hidden"></div>
         </div>
       </div>
 
-      <!-- Incident Subclips Carousel / List -->
+      <!-- Incident Subclips Gallery -->
       <div id="clipsGalleryView" class="clips-gallery hidden">
-        <div class="gallery-empty" id="clipsEmptyNotice">No incident clips sliced yet. Confirm events to auto-generate review clips.</div>
+        <div class="gallery-empty" id="clipsEmptyNotice">
+          No incident sub-clips sliced yet. Click "&#x2702; Cut Clip" on any event or quick action to generate reviewable clips.
+        </div>
         <div class="clips-grid" id="clipsGrid"></div>
       </div>
     </section>
@@ -157,13 +218,18 @@
         </div>
       </div>
 
+      <!-- Search / Category Filter Bar -->
+      <div class="review-search-bar">
+        <input type="text" id="eventSearchInput" placeholder="Filter events by category or description...">
+      </div>
+
       <div class="events-list" id="eventsList">
         <div class="empty-state">No events correlated for this case.</div>
       </div>
     </aside>
   </main>
 
-  <!-- Bottom Drawer: Evidence Assessments, Frame Gallery, and Audit Trail -->
+  <!-- Bottom Drawer: Evidence Assessments, Observations, Frame Gallery, and Audit Trail -->
   <footer class="bottom-drawer" id="bottomDrawer">
     <div class="drawer-header" id="drawerToggle">
       <div class="drawer-title">
@@ -172,9 +238,10 @@
       </div>
       <div class="drawer-tabs">
         <button class="drawer-tab active" data-target="tabFrames">Extracted Frames (<span id="framesCount">0</span>)</button>
-        <button class="drawer-tab" data-target="tabAssessments">Evidence Assessments</button>
+        <button class="drawer-tab" data-target="tabObservations">Observations (<span id="obsCount">0</span>)</button>
+        <button class="drawer-tab" data-target="tabAssessments">Evidence Assessments (<span id="assessCount">0</span>)</button>
         <button class="drawer-tab" data-target="tabAudit">Audit Trail (<span id="auditCount">0</span>)</button>
-        <button class="drawer-tab" data-target="tabReport">Report Summary</button>
+        <button class="drawer-tab" data-target="tabReport">Forensic Report</button>
       </div>
     </div>
 
@@ -186,25 +253,46 @@
         </div>
       </div>
 
-      <!-- Tab 2: Evidence Assessments -->
-      <div class="drawer-tab-pane" id="tabAssessments">
-        <table class="forensic-table" id="assessmentsTable">
+      <!-- Tab 2: Raw Model Observations -->
+      <div class="drawer-tab-pane" id="tabObservations">
+        <table class="forensic-table" id="observationsTable">
           <thead>
             <tr>
-              <th>Target</th>
-              <th>Assessment Type</th>
-              <th>Rating</th>
-              <th>Rationale</th>
-              <th>Assessor</th>
+              <th>ID</th>
+              <th>Modality</th>
+              <th>Finding Type</th>
+              <th>Timecode Interval</th>
+              <th>Confidence</th>
+              <th>Description</th>
+              <th>Provenance / Model</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td colspan="5" style="text-align:center;">No evidence assessments available.</td></tr>
+            <tr><td colspan="7" style="text-align:center;">No observations recorded.</td></tr>
           </tbody>
         </table>
       </div>
 
-      <!-- Tab 3: Audit Trail -->
+      <!-- Tab 3: Evidence Assessments -->
+      <div class="drawer-tab-pane" id="tabAssessments">
+        <table class="forensic-table" id="assessmentsTable">
+          <thead>
+            <tr>
+              <th>Target ID</th>
+              <th>Target Type</th>
+              <th>Assessment Dimension</th>
+              <th>Quality Rating</th>
+              <th>Rationale &amp; Verification Justification</th>
+              <th>Assessor</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="6" style="text-align:center;">No evidence assessments available.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Tab 4: Audit Trail -->
       <div class="drawer-tab-pane" id="tabAudit">
         <table class="forensic-table" id="auditTable">
           <thead>
@@ -223,7 +311,7 @@
         </table>
       </div>
 
-      <!-- Tab 4: Report Summary -->
+      <!-- Tab 5: Report Summary -->
       <div class="drawer-tab-pane" id="tabReport">
         <div class="report-preview-box" id="reportPreviewBox">
           <div class="gallery-empty">No report generated for this case.</div>
@@ -388,6 +476,42 @@
           <button type="submit" class="btn btn-primary" id="submitFinalizeBtn">Finalize &amp; Lock Deliverable</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Modal 4: Keyboard Shortcuts Help -->
+  <div id="hotkeysModal" class="modal-backdrop hidden">
+    <div class="modal hotkeys-modal">
+      <div class="modal-header">
+        <h3>&#x2328; Forensic Console Keyboard Shortcuts</h3>
+        <button class="modal-close" id="closeHotkeysModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <table class="forensic-table hotkeys-table">
+          <thead>
+            <tr>
+              <th>Key</th>
+              <th>Action</th>
+              <th>Context</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><kbd>Space</kbd></td><td>Play / Pause footage</td><td>Video Player</td></tr>
+            <tr><td><kbd>&larr;</kbd> / <kbd>&rarr;</kbd></td><td>Seek -2.0s / +2.0s</td><td>Video Player</td></tr>
+            <tr><td><kbd>J</kbd> / <kbd>L</kbd></td><td>Frame Step -0.1s / +0.1s</td><td>Video Player</td></tr>
+            <tr><td><kbd>X</kbd></td><td>Quick Cut Clip around playhead</td><td>Video Player</td></tr>
+            <tr><td><kbd>F</kbd></td><td>Toggle Fullscreen</td><td>Video Player</td></tr>
+            <tr><td><kbd>D</kbd></td><td>Seed &amp; Load Demo Case</td><td>Global</td></tr>
+            <tr><td><kbd>N</kbd></td><td>Open Footage Ingestion Modal</td><td>Global</td></tr>
+            <tr><td><kbd>E</kbd></td><td>Export Deliverable Menu</td><td>Global</td></tr>
+            <tr><td><kbd>?</kbd></td><td>Show / Hide this shortcut cheat sheet</td><td>Global</td></tr>
+            <tr><td><kbd>Esc</kbd></td><td>Close any active modal or menu</td><td>Global</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="dismissHotkeysBtn">Close</button>
+      </div>
     </div>
   </div>
 
