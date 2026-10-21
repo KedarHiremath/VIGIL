@@ -1,5 +1,7 @@
 """Temporal event correlation and relationship discovery worker."""
 
+from __future__ import annotations
+
 import json
 import logging
 import uuid
@@ -14,11 +16,38 @@ from vigil.tools.base import BaseToolWorker
 logger = logging.getLogger(__name__)
 
 
+def _format_timecode(seconds: float | None) -> str:
+    """Format seconds into MM:SS.ss timecode."""
+    if seconds is None:
+        return "N/A"
+    mins = int(seconds // 60)
+    secs = seconds % 60
+    return f"{mins:02d}:{secs:05.2f}"
+
+
 class EventCorrelatorWorker(BaseToolWorker):
     """Synthesizes observations across timeline into Events and EventLinks."""
 
     def run(self, request: TaskRequest) -> list[str]:
         obs_ids = list(request.input_refs)
+        investigation_id = request.parameters.get("investigation_id")
+
+        if not obs_ids and investigation_id:
+            state = self.repository.get_state(str(investigation_id))
+            if state and state.observation_ids:
+                obs_ids = list(state.observation_ids)
+
+        if not obs_ids and investigation_id:
+            try:
+                inv = self.repository.get_investigation(str(investigation_id))
+                target_media_ids = set(inv.media_asset_ids)
+                all_obs = self.repository.list_observations()
+                for o in all_obs:
+                    if any(sr.media_asset_id in target_media_ids for sr in o.source_references):
+                        obs_ids.append(o.observation_id)
+            except Exception:
+                pass
+
         if not obs_ids:
             all_obs = self.repository.list_observations()
             if not all_obs:
@@ -29,17 +58,35 @@ class EventCorrelatorWorker(BaseToolWorker):
 
         observations = [self.repository.get_observation(oid) for oid in obs_ids]
 
-        # Correlate observations into events using LLM reasoning
-        obs_summary = "\n".join(
-            [
-                f"- ID: {o.observation_id}, Modality: {o.modality}, Type: {o.observation_type}, Desc: {o.description}"
-                for o in observations
-            ]
-        )
+        # Retrieve objective context
+        obj_context = ""
+        if investigation_id:
+            try:
+                inv = self.repository.get_investigation(str(investigation_id))
+                if inv.objective:
+                    obj_context = f"Investigation Objective: {inv.objective}\n"
+            except Exception:
+                pass
+
+        # Correlate observations into events using LLM reasoning with timecode context
+        obs_summary_lines = []
+        for o in observations:
+            sr = o.source_references[0] if o.source_references else None
+            t_str = ""
+            if sr and sr.start_seconds is not None and sr.end_seconds is not None:
+                t_str = f"Timecode: [{_format_timecode(sr.start_seconds)} - {_format_timecode(sr.end_seconds)} ({sr.start_seconds:.1f}s-{sr.end_seconds:.1f}s)]"
+            elif sr and sr.start_seconds is not None:
+                t_str = f"Timecode: [{sr.start_seconds:.1f}s]"
+            obs_summary_lines.append(
+                f"- ID: {o.observation_id}, Modality: {o.modality}, Type: {o.observation_type}, {t_str}, Desc: {o.description}"
+            )
+        obs_summary = "\n".join(obs_summary_lines)
 
         prompt = (
-            f"You are a video forensic analyst. Group the following observations into distinct events.\n"
+            f"You are a forensic video timeline analyst. Correlate the following observations into discrete chronological events.\n"
+            f"{obj_context}"
             f"Observations:\n{obs_summary}\n\n"
+            "Group temporally and logically related observations into distinct events. "
             "Return JSON with 'events', each with: 'event_type', 'description', and 'observation_ids'. "
             "Also optional 'links' with 'from_event_index', 'to_event_index', 'relationship_type' "
             "(before/after/overlaps/related_to/possible_same_incident), and 'rationale'."

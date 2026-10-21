@@ -255,6 +255,15 @@
 
       <!-- Tab 2: Raw Model Observations -->
       <div class="drawer-tab-pane" id="tabObservations">
+        <div class="drawer-info-card">
+          <div class="drawer-info-header">
+            <span class="drawer-info-badge">OBSERVATIONS EXPLAINED</span>
+            <strong>Raw Objective Model Detections Across Footage Timestamps</strong>
+          </div>
+          <p class="drawer-info-text">
+            Observations record discrete physical findings detected by Vision (VLM) and Audio DSP analysis (e.g. person movement, vehicles, acoustic transients). Each observation is linked to a precise video timecode. Click any row to jump the player directly to that moment in the footage.
+          </p>
+        </div>
         <table class="forensic-table" id="observationsTable">
           <thead>
             <tr>
@@ -275,6 +284,15 @@
 
       <!-- Tab 3: Evidence Assessments -->
       <div class="drawer-tab-pane" id="tabAssessments">
+        <div class="drawer-info-card">
+          <div class="drawer-info-header">
+            <span class="drawer-info-badge assess-badge">EVIDENCE ASSESSMENT EXPLAINED</span>
+            <strong>Investigative Credibility, Support Level &amp; Uncertainty Verification</strong>
+          </div>
+          <p class="drawer-info-text">
+            Evidence Assessments evaluate whether detected observations and correlated events are credible, sufficiently supported, or uncertain. The AI Forensic Assessor reviews visual continuity, acoustic corroboration, and occlusion, assigning a Quality Rating (HIGH, MODERATE, LOW, or INSUFFICIENT) with an objective investigative rationale.
+          </p>
+        </div>
         <table class="forensic-table" id="assessmentsTable">
           <thead>
             <tr>

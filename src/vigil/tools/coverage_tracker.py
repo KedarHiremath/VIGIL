@@ -1,5 +1,7 @@
 """Coverage tracker worker recording forensic examination status."""
 
+from __future__ import annotations
+
 import uuid
 from datetime import UTC, datetime
 
@@ -18,16 +20,28 @@ class CoverageTrackerWorker(BaseToolWorker):
         source_ref_ids = list(request.input_refs)
 
         if not source_ref_ids:
-            # Gather source references or media assets from repository
+            try:
+                inv = self.repository.get_investigation(investigation_id)
+                source_ref_ids = list(inv.media_asset_ids)
+            except Exception:
+                pass
+
+        if not source_ref_ids:
             media_assets = self.repository.list_media_assets()
             if media_assets:
                 source_ref_ids = [m.media_asset_id for m in media_assets]
             else:
                 source_ref_ids = ["src-media-001"]
 
-        # Collect artifacts related to these sources
-        artifacts = self.repository.list_artifacts()
-        artifact_ids = [a.artifact_id for a in artifacts]
+        # Collect artifacts strictly related to these sources
+        all_artifacts = self.repository.list_artifacts()
+        artifact_ids = [
+            a.artifact_id
+            for a in all_artifacts
+            if a.source_reference and a.source_reference.media_asset_id in source_ref_ids
+        ]
+        if not artifact_ids and all_artifacts:
+            artifact_ids = [a.artifact_id for a in all_artifacts]
 
         output_coverage_ids: list[str] = []
         now = datetime.now(UTC)
@@ -35,7 +49,6 @@ class CoverageTrackerWorker(BaseToolWorker):
         for s_ref_id in source_ref_ids:
             cov_id = f"cov-{uuid.uuid4().hex[:8]}"
 
-            # Pair start and end timestamps consistently
             rec = CoverageRecord(
                 coverage_id=cov_id,
                 investigation_id=investigation_id,

@@ -897,6 +897,37 @@
   });
 
   // -------------------------------------------------------------------------
+
+  function formatSecondsToTimecode(sec) {
+    if (sec === null || sec === undefined || isNaN(sec)) return "-";
+    const mins = Math.floor(sec / 60);
+    const secs = (sec % 60).toFixed(1);
+    const padM = mins < 10 ? "0" + mins : mins;
+    const padS = (sec % 60) < 10 ? "0" + secs : secs;
+    return `${padM}:${padS}`;
+  }
+
+  function cleanObservationDesc(desc) {
+    if (!desc) return "";
+    let clean = desc.trim();
+    if (clean.startsWith("```json")) clean = clean.substring(7);
+    if (clean.startsWith("```")) clean = clean.substring(3);
+    if (clean.endsWith("```")) clean = clean.substring(0, clean.length - 3);
+    return clean.trim();
+  }
+
+  function cleanRationaleText(text) {
+    if (!text) return "";
+    let clean = text
+      .replace(/\*\*Rating\s*:\s*[^\*]+\*\*/gi, "")
+      .replace(/\*\*Rationale\s*:\s*\*\*/gi, "")
+      .replace(/^Rating\s*:\s*[^\n]+\n?/gi, "")
+      .replace(/^Rationale\s*:\s*/gi, "")
+      .replace(/^[\s\-*•]+/g, "")
+      .trim();
+    return clean || text.trim();
+  }
+
   // Observations Drawer Table
   // -------------------------------------------------------------------------
   function renderObservations() {
@@ -904,14 +935,19 @@
     el.observationsTable.innerHTML = "";
 
     if (state.observations.length === 0) {
-      el.observationsTable.innerHTML = `<tr><td colspan="7" style="text-align:center;">No observations recorded.</td></tr>`;
+      el.observationsTable.innerHTML = `<tr><td colspan="7" style="text-align:center;">No observations recorded for this investigation.</td></tr>`;
       return;
     }
 
     state.observations.forEach((obs) => {
       const row = document.createElement("tr");
       const sr = obs.source_references && obs.source_references.length > 0 ? obs.source_references[0] : null;
-      const intervalStr = sr ? `${sr.start_seconds?.toFixed(1)}s &ndash; ${sr.end_seconds?.toFixed(1)}s` : "-";
+      let intervalStr = "-";
+      if (sr && sr.start_seconds !== null && sr.end_seconds !== null) {
+        intervalStr = `<code>${formatSecondsToTimecode(sr.start_seconds)} &ndash; ${formatSecondsToTimecode(sr.end_seconds)}</code> <small style="color:var(--text-dim)">(${sr.start_seconds.toFixed(1)}s &ndash; ${sr.end_seconds.toFixed(1)}s)</small>`;
+      } else if (sr && sr.start_seconds !== null) {
+        intervalStr = `<code>${formatSecondsToTimecode(sr.start_seconds)}</code> <small style="color:var(--text-dim)">(${sr.start_seconds.toFixed(1)}s)</small>`;
+      }
       
       const confPct = obs.confidence !== null ? Math.round(obs.confidence * 100) : 85;
       const confHtml = `
@@ -925,6 +961,7 @@
 
       const modClass = `modality-${obs.modality}`;
       const provName = obs.provenance ? `${obs.provenance.producer_name}` : "-";
+      const cleanDesc = cleanObservationDesc(obs.description);
 
       row.innerHTML = `
         <td><code>${obs.observation_id}</code></td>
@@ -932,7 +969,7 @@
         <td><strong>${obs.observation_type.replace(/_/g, " ")}</strong></td>
         <td>${intervalStr}</td>
         <td>${confHtml}</td>
-        <td>${obs.description}</td>
+        <td>${cleanDesc}</td>
         <td><small style="color:var(--text-dim);">${provName}</small></td>
       `;
 
@@ -956,20 +993,21 @@
     el.assessmentsTable.innerHTML = "";
 
     if (state.assessments.length === 0) {
-      el.assessmentsTable.innerHTML = `<tr><td colspan="6" style="text-align:center;">No evidence assessments available.</td></tr>`;
+      el.assessmentsTable.innerHTML = `<tr><td colspan="6" style="text-align:center;">No evidence assessments available for this case.</td></tr>`;
       return;
     }
 
     state.assessments.forEach((as) => {
       const row = document.createElement("tr");
       const ratingClass = `rating-${as.rating}`;
+      const cleanRat = cleanRationaleText(as.rationale);
 
       row.innerHTML = `
         <td><code>${as.target_id}</code></td>
         <td><span class="badge">${as.target_type}</span></td>
         <td><strong>${as.assessment_type.replace(/_/g, " ").toUpperCase()}</strong></td>
-        <td><span class="rating-badge ${ratingClass}">${as.rating}</span></td>
-        <td>${as.rationale}</td>
+        <td><span class="rating-badge ${ratingClass}">${as.rating.toUpperCase()}</span></td>
+        <td>${cleanRat}</td>
         <td><small style="color:var(--text-dim);">${as.assessed_by}</small></td>
       `;
       el.assessmentsTable.appendChild(row);

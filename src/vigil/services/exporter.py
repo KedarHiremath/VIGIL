@@ -34,6 +34,39 @@ def _uri_to_local_path(uri: str) -> Path | None:
     p = Path(uri)
     return p if p.is_file() else None
 
+def _format_timecode(seconds: float | None) -> str:
+    """Format seconds into MM:SS.ss timecode."""
+    if seconds is None:
+        return "N/A"
+    mins = int(seconds // 60)
+    secs = seconds % 60
+    return f"{mins:02d}:{secs:05.2f}"
+
+
+def _format_interval(start: float | None, end: float | None) -> str:
+    if start is None and end is None:
+        return "Timeline: N/A"
+    if start is not None and end is not None:
+        return f"{_format_timecode(start)} &ndash; {_format_timecode(end)} ({start:.1f}s &ndash; {end:.1f}s)"
+    if start is not None:
+        return f"From {_format_timecode(start)} ({start:.1f}s)"
+    return f"Until {_format_timecode(end)} ({end:.1f}s)"
+
+
+def _clean_rationale(text: str) -> str:
+    """Clean raw markdown tags, bold rating/rationale headers from rationale."""
+    if not text:
+        return ""
+    import re
+    cleaned = re.sub(r"\*\*Rating\s*:\s*[^\*]+\*\*", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\*\*Rationale\s*:\s*\*\*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(Rating\s*:\s*[^\n]+\n?)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(Rationale\s*:\s*)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^[\s\-*•]+", "", cleaned.strip())
+    lines = [line.strip().lstrip("-*• ") for line in cleaned.splitlines() if line.strip()]
+    return " ".join(lines) if lines else text.strip()
+
+
 
 class ReportExporter:
     """Exports structured VIGIL forensic reports into interactive HTML and publication-ready PDF formats."""
@@ -83,6 +116,7 @@ class ReportExporter:
             if not matched:
                 unassigned_clips.append(clip)
 
+        events = sorted(events, key=lambda e: (e.start_seconds if e.start_seconds is not None else 0.0))
         confirmed_count = sum(1 for e in events if e.status == "confirmed")
         rejected_count = sum(1 for e in events if e.status == "rejected")
         proposed_count = sum(
@@ -479,9 +513,9 @@ class ReportExporter:
         <tr>
           <td><code>{html.escape(ass.assessment_id)}</code></td>
           <td>{html.escape(ass.target_type)}:{html.escape(ass.target_id)}</td>
-          <td>{html.escape(ass.assessment_type)}</td>
-          <td><strong>{html.escape(ass.rating)}</strong></td>
-          <td>{html.escape(ass.rationale)}</td>
+          <td>{html.escape(ass.assessment_type.replace('_', ' ').title())}</td>
+          <td><span class="status-pill rating-{ass.rating}">{html.escape(ass.rating.upper())}</span></td>
+          <td>{html.escape(_clean_rationale(ass.rationale))}</td>
           <td>{html.escape(ass.assessed_by)}</td>
         </tr>
 """
@@ -539,6 +573,125 @@ class ReportExporter:
 </html>
 """
         return doc
+
+
+    @staticmethod
+    def export_markdown(
+        investigation: Investigation,
+        report: Report,
+        events: list[Event],
+        observations: list[Observation],
+        assessments: list[EvidenceAssessment],
+        coverages: list[CoverageRecord],
+        artifacts: list[Artifact],
+        audit_logs: list[AuditLog],
+        media_assets: list[MediaAsset] | None = None,
+    ) -> str:
+        """Render complete forensic report as a structured, timestamp-indexed Markdown document."""
+        media_assets = media_assets or []
+        media_name = Path(media_assets[0].storage_uri).name if media_assets else "Primary Media"
+        media_sha = (media_assets[0].sha256[:16] + "...") if (media_assets and media_assets[0].sha256) else "N/A"
+
+        confirmed_count = sum(1 for e in events if e.status == "confirmed")
+        rejected_count = sum(1 for e in events if e.status == "rejected")
+        proposed_count = sum(1 for e in events if e.status in {"proposed", "under_review"})
+
+        sorted_events = sorted(
+            events,
+            key=lambda e: (e.start_seconds if e.start_seconds is not None else 0.0),
+        )
+
+        md: list[str] = []
+        md.append(f"# {report.title}\n")
+        md.append(f"**Investigation Objective:** {investigation.objective or 'Forensic timeline and activity verification.'}\n")
+        md.append("| Investigation Metadata | Value | Evidence Scope | Count |")
+        md.append("| :--- | :--- | :--- | :--- |")
+        md.append(f"| **Investigation ID** | `{investigation.investigation_id}` | **Total Observations** | {len(observations)} |")
+        md.append(f"| **Report ID / Version** | `{report.report_id}` (v{report.version} - {report.status.upper()}) | **Correlated Events** | {len(events)} ({confirmed_count} Confirmed, {proposed_count} Review, {rejected_count} Rejected) |")
+        md.append(f"| **Primary Media** | `{media_name}` | **Evidence Assessments** | {len(assessments)} |")
+        md.append(f"| **Media SHA-256** | `{media_sha}` | **Coverage Records** | {len(coverages)} |")
+        md.append(f"| **Generated By** | `{report.generated_by}` ({report.generated_at.strftime('%Y-%m-%d %H:%M UTC')}) | **Review Status** | `{report.status.upper()}` |")
+        md.append(f"| **Finalized By** | `{report.finalized_by or 'Pending Review'}` | **Finalized At** | `{report.finalized_at.strftime('%Y-%m-%d %H:%M UTC') if report.finalized_at else 'Pending'}` |\n")
+
+        md.append("## 1. Executive Summary & Findings\n")
+        md.append(f"{report.summary}\n")
+        if report.notes:
+            md.append(f"> **Investigator Final Notes:** {report.notes}\n")
+
+        md.append("## 2. Chronological Correlated Events & Incident Timeline\n")
+        if not sorted_events:
+            md.append("*No correlated events recorded.*\n")
+        else:
+            md.append("| Timecode Interval | Event Type | Status | Description | Supporting Obs |")
+            md.append("| :--- | :--- | :--- | :--- | :--- |")
+            for evt in sorted_events:
+                t_str = ""
+                if evt.start_seconds is not None and evt.end_seconds is not None:
+                    t_str = f"`{_format_timecode(evt.start_seconds)} - {_format_timecode(evt.end_seconds)}` ({evt.start_seconds:.1f}s - {evt.end_seconds:.1f}s)"
+                elif evt.start_seconds is not None:
+                    t_str = f"`{evt.start_seconds:.1f}s`"
+                else:
+                    t_str = "N/A"
+                desc = evt.description.replace("|", "-")
+                md.append(f"| {t_str} | **{evt.event_type.replace('_', ' ').title()}** | `{evt.status.upper()}` | {desc} | {len(evt.observation_ids)} obs |")
+            md.append("")
+
+            for evt in sorted_events:
+                t_str = ""
+                if evt.start_seconds is not None and evt.end_seconds is not None:
+                    t_str = f"{_format_timecode(evt.start_seconds)} – {_format_timecode(evt.end_seconds)} ({evt.start_seconds:.1f}s – {evt.end_seconds:.1f}s)"
+                md.append(f"### #{evt.event_id} • {evt.event_type.replace('_', ' ').title()}")
+                md.append(f"- **Status:** `{evt.status}` | **Footage interval:** {t_str} | **Supporting Observations:** {len(evt.observation_ids)}")
+                md.append(f"- **Details:** {evt.description}")
+                if evt.reviewer or evt.review_notes:
+                    md.append(f"- **Reviewer Decision:** {evt.reviewer or 'Lead Investigator'} [{evt.status.upper()}] — {evt.review_notes or 'No review notes'}")
+                md.append("")
+
+        md.append("## 3. Evidence Assessments & Certainty\n")
+        if not assessments:
+            md.append("*No formal evidence assessments recorded.*\n")
+        else:
+            md.append("| Assessment ID | Target | Dimension | Quality Rating | Forensic Verification Rationale | Assessor |")
+            md.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
+            for ass in assessments:
+                clean_rat = _clean_rationale(ass.rationale).replace("|", "-")
+                md.append(f"| `{ass.assessment_id}` | `{ass.target_type}:{ass.target_id}` | {ass.assessment_type.replace('_', ' ').title()} | **{ass.rating.upper()}** | {clean_rat} | {ass.assessed_by} |")
+            md.append("")
+
+        md.append("## 4. Investigator Review Decisions & Audit Trail\n")
+        if not audit_logs:
+            md.append("*No audit entries recorded.*\n")
+        else:
+            md.append("| Timestamp (UTC) | Actor / Badge | Action | Target ID | Notes & Justification |")
+            md.append("| :--- | :--- | :--- | :--- | :--- |")
+            for log in audit_logs:
+                notes = (log.notes or "").replace("|", "-")
+                md.append(f"| {log.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | {log.actor} | `{log.action}` | `{log.target_id}` | {notes} |")
+            md.append("")
+
+        md.append("## 5. Media Authenticity & Ingestion Provenance\n")
+        if not media_assets:
+            md.append("*No primary media recorded.*\n")
+        else:
+            md.append("| Media Asset ID | Type | Duration | SHA-256 Checksum | Storage URI |")
+            md.append("| :--- | :--- | :--- | :--- | :--- |")
+            for m in media_assets:
+                dur_str = f"{m.duration_seconds:.1f}s" if m.duration_seconds else "N/A"
+                md.append(f"| `{m.media_asset_id}` | {m.media_type} | {dur_str} | `{m.sha256 or 'N/A'}` | `{m.storage_uri}` |")
+            md.append("")
+
+        md.append("## 6. Source Timeline Examination Coverage\n")
+        if not coverages:
+            md.append("*No coverage records logged.*\n")
+        else:
+            md.append("| Coverage ID | Source Ref | Status | Interval Examined | Coverage Notes |")
+            md.append("| :--- | :--- | :--- | :--- | :--- |")
+            for cov in coverages:
+                notes = (cov.notes or "").replace("|", "-")
+                md.append(f"| `{cov.coverage_id}` | `{cov.source_reference_id}` | `{cov.status.value}` | {cov.interval_start.strftime('%H:%M:%S')} - {cov.interval_end.strftime('%H:%M:%S')} | {notes} |")
+            md.append("")
+
+        return "\n".join(md)
 
     @staticmethod
     def export_pdf(

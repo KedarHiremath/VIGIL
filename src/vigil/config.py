@@ -46,13 +46,13 @@ class VigilConfig:
     openrouter_api_key: str | None = None
     openrouter_model: str = "google/gemini-2.0-flash-exp:free"
     # ------------------------------------------------------------------
-    # NVIDIA NIM (Cosmos 3 Nano Reasoner VLM + Nemotron 3 Nano 30B LLM)
+    # NVIDIA NIM (Llama 3.2 11B Vision VLM + Nemotron 3 Nano 30B LLM)
     # ------------------------------------------------------------------
     nvidia_api_key: str | None = None
-    nvidia_vlm_model: str = "nvidia/cosmos3-nano-reasoner"
+    nvidia_vlm_model: str = "meta/llama-3.2-11b-vision-instruct"
     nvidia_llm_model: str = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
     nvidia_llm_base_url: str = "https://integrate.api.nvidia.com/v1"
-    nvidia_vlm_base_url: str = "https://ai.api.nvidia.com/v1"
+    nvidia_vlm_base_url: str = "https://integrate.api.nvidia.com/v1"
     # ------------------------------------------------------------------
     storage_root: str = "./storage_data"
     log_level: str = "INFO"
@@ -101,7 +101,7 @@ class VigilConfig:
             ),
             nvidia_api_key=nvidia_key,
             nvidia_vlm_model=os.getenv(
-                "NVIDIA_VLM_MODEL", "nvidia/cosmos3-nano-reasoner"
+                "NVIDIA_VLM_MODEL", "meta/llama-3.2-11b-vision-instruct"
             ),
             nvidia_llm_model=os.getenv(
                 "NVIDIA_LLM_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
@@ -110,7 +110,7 @@ class VigilConfig:
                 "NVIDIA_LLM_BASE_URL", "https://integrate.api.nvidia.com/v1"
             ),
             nvidia_vlm_base_url=os.getenv(
-                "NVIDIA_VLM_BASE_URL", "https://ai.api.nvidia.com/v1"
+                "NVIDIA_VLM_BASE_URL", "https://integrate.api.nvidia.com/v1"
             ),
             storage_root=os.getenv("VIGIL_STORAGE_ROOT", "./storage_data"),
             log_level=os.getenv("VIGIL_LOG_LEVEL", "INFO"),

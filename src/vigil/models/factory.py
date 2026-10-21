@@ -24,7 +24,7 @@ def get_llm_client(
 
     Supported providers
     -------------------
-    * ``nvidia_nim``  — NVIDIA Cosmos 3 Nano Reasoner (VLM) +
+    * ``nvidia_nim``  — NVIDIA Llama 3.2 11B Vision (VLM) +
                         Nemotron 3 Nano 30B A3B Reasoning (LLM) via NIM API.
     * ``gemini``      — Google Gemini 2.0 Flash (multimodal, free tier).
     * ``groq``        — Groq Cloud free tier (GPT-OSS 20B / Whisper).
@@ -57,6 +57,8 @@ def get_llm_client(
             api_key=cfg.nvidia_api_key,
             vlm_model=cfg.nvidia_vlm_model,
             llm_model=cfg.nvidia_llm_model,
+            vlm_base_url=cfg.nvidia_vlm_base_url,
+            llm_base_url=cfg.nvidia_llm_base_url,
         )
 
     # ------------------------------------------------------------------

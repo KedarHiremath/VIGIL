@@ -2,7 +2,7 @@
 
 Dual-model design
 -----------------
-* **VLM** (visual tasks):  ``nvidia/cosmos3-nano-reasoner``
+* **VLM** (visual tasks):  ``meta/llama-3.2-11b-vision-instruct``
   – Cosmos 3 Nano Reasoner is optimised for structured physical-scene reasoning
   from images/video frames; used by ``analyze_image``.
   Endpoint: ``https://ai.api.nvidia.com/v1``
@@ -64,10 +64,10 @@ logger = logging.getLogger(__name__)
 # LLM / text models  (Nemotron, Llama, Mistral …)
 NVIDIA_LLM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 # VLM / multimodal models  (Cosmos Reasoner, NVLM …)
-NVIDIA_VLM_BASE_URL = "https://ai.api.nvidia.com/v1"
+NVIDIA_VLM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 # Default model identifiers (can be overridden via env / constructor)
-DEFAULT_VLM_MODEL = "nvidia/cosmos3-nano-reasoner"
+DEFAULT_VLM_MODEL = "meta/llama-3.2-11b-vision-instruct"
 DEFAULT_LLM_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 
 # HTTP status codes that are transient and worth retrying automatically
@@ -159,7 +159,7 @@ class NvidiaNIMClient(BaseLLMClient):
         Your ``nvapi-*`` key from https://build.nvidia.com.
     vlm_model:
         Model used for image/video-frame analysis (``analyze_image``).
-        Defaults to ``nvidia/cosmos3-nano-reasoner``.
+        Defaults to ``meta/llama-3.2-11b-vision-instruct``.
     llm_model:
         Model used for text generation and reasoning (``generate_text``).
         Defaults to ``nvidia/nemotron-3-nano-omni-30b-a3b-reasoning``.
@@ -180,6 +180,8 @@ class NvidiaNIMClient(BaseLLMClient):
         vlm_model: str = DEFAULT_VLM_MODEL,
         llm_model: str = DEFAULT_LLM_MODEL,
         base_url: str = NVIDIA_LLM_BASE_URL,  # kept for compat; auto-routed
+        vlm_base_url: str | None = None,
+        llm_base_url: str | None = None,
         timeout_seconds: float = 120.0,
         max_retries: int = 5,
         retry_backoff_base: float = 2.0,
@@ -192,9 +194,18 @@ class NvidiaNIMClient(BaseLLMClient):
         self.api_key = api_key.strip()
         self.vlm_model = vlm_model.strip()
         self.llm_model = llm_model.strip()
-        # Explicit endpoints per model family
-        self._llm_base_url = NVIDIA_LLM_BASE_URL
-        self._vlm_base_url = NVIDIA_VLM_BASE_URL
+        # Allow per-instance base URL override (reads from env/config)
+        import os as _os
+        self._llm_base_url = (
+            llm_base_url
+            or _os.getenv("NVIDIA_LLM_BASE_URL")
+            or NVIDIA_LLM_BASE_URL
+        )
+        self._vlm_base_url = (
+            vlm_base_url
+            or _os.getenv("NVIDIA_VLM_BASE_URL")
+            or NVIDIA_VLM_BASE_URL
+        )
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.retry_backoff_base = retry_backoff_base

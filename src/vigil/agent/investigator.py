@@ -57,42 +57,49 @@ class AgenticOrchestrator:
         llm_client: BaseLLMClient | None = None,
     ) -> None:
         self.repository = repository or InvestigationRepository()
+        self._custom_service = service
         self.llm = llm_client or get_llm_client()
-        self.planner = planner or InvestigationPlanner(llm_client=self.llm)
 
-        if service is None:
+    @property
+    def llm(self) -> BaseLLMClient:
+        return self._llm
+
+    @llm.setter
+    def llm(self, client: BaseLLMClient) -> None:
+        self._llm = client
+        self.planner = InvestigationPlanner(llm_client=self._llm)
+        if self._custom_service is None:
             executor = create_default_executor(
-                repository=self.repository, llm_client=self.llm
+                repository=self.repository, llm_client=self._llm
             )
             self.service = OrchestrationService(executor=executor)
         else:
-            self.service = service
+            self.service = self._custom_service
 
-        # Instantiate specialized agents
         self.visual_agent = VisualAgent(
             repository=self.repository,
             service=self.service,
-            llm_client=self.llm,
+            llm_client=self._llm,
         )
         self.audio_agent = AudioAgent(
             repository=self.repository,
             service=self.service,
-            llm_client=self.llm,
+            llm_client=self._llm,
         )
         self.correlation_agent = TemporalCorrelationAgent(
             repository=self.repository,
             service=self.service,
-            llm_client=self.llm,
+            llm_client=self._llm,
         )
         self.verification_agent = EvidenceVerificationAgent(
             repository=self.repository,
             service=self.service,
-            llm_client=self.llm,
+            llm_client=self._llm,
         )
         self.report_writer = ReportWriterAgent(
             repository=self.repository,
             service=self.service,
-            llm_client=self.llm,
+            llm_client=self._llm,
         )
 
     def step(
@@ -313,17 +320,21 @@ class AgenticOrchestrator:
                     },
                 )
 
-        # Collect consolidated findings
+        # Collect consolidated findings scoped strictly to this investigation
+        inv_obs = self.repository.list_observations(state.observation_ids)
+        inv_events = self.repository.list_events(state.event_ids)
+        target_ids = set(state.event_ids) | set(state.observation_ids)
+        all_assessments = self.repository.list_evidence_assessments()
+        scoped_assessments = [a for a in all_assessments if a.target_id in target_ids]
+
         return InvestigationOutcome(
             investigation=investigation,
             state=state,
             report=final_report,
             task_results=task_results,
-            observations=self.repository.list_observations(
-                state.observation_ids
-            ),
-            events=self.repository.list_events(state.event_ids),
-            assessments=self.repository.list_evidence_assessments(),
+            observations=inv_obs,
+            events=inv_events,
+            assessments=scoped_assessments,
             coverage_records=self.repository.list_coverage_records(
                 investigation.investigation_id
             ),

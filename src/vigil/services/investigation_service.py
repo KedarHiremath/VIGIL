@@ -604,7 +604,7 @@ class InvestigationService:
         report_id = f"rep-fin-{uuid.uuid4().hex[:8]}"
 
         coverages = self.get_coverage_records(investigation_id)
-        assessments = self.repository.list_evidence_assessments()
+        assessments = self.get_evidence_assessments(investigation_id)
 
         final_report = Report(
             report_id=report_id,
@@ -672,7 +672,7 @@ class InvestigationService:
         obs = self.get_observations(investigation_id)
         coverages = self.get_coverage_records(investigation_id)
         artifacts = self.get_artifacts(investigation_id)
-        assessments = self.repository.list_evidence_assessments()
+        assessments = self.get_evidence_assessments(investigation_id)
         audit_logs = self.get_audit_logs(investigation_id)
         media_assets = [self.repository.get_media_asset(mid) for mid in inv.media_asset_ids if mid in [m.media_asset_id for m in self.repository.list_media_assets()]]
 
@@ -704,7 +704,7 @@ class InvestigationService:
         obs = self.get_observations(investigation_id)
         coverages = self.get_coverage_records(investigation_id)
         artifacts = self.get_artifacts(investigation_id)
-        assessments = self.repository.list_evidence_assessments()
+        assessments = self.get_evidence_assessments(investigation_id)
         audit_logs = self.get_audit_logs(investigation_id)
         media_assets = [self.repository.get_media_asset(mid) for mid in inv.media_asset_ids if mid in [m.media_asset_id for m in self.repository.list_media_assets()]]
 
@@ -738,14 +738,48 @@ class InvestigationService:
         return _uri_to_local_path(media_asset.storage_uri)
 
     def get_evidence_assessments(self, investigation_id: str) -> list[EvidenceAssessment]:
-        """Retrieve evidence assessments related to an investigation."""
+        """Retrieve evidence assessments strictly related to an investigation."""
         self.get_investigation(investigation_id)
         events = self.get_events(investigation_id)
         obs = self.get_observations(investigation_id)
         target_ids = {e.event_id for e in events} | {o.observation_id for o in obs}
         all_assessments = self.repository.list_evidence_assessments()
-        filtered = [a for a in all_assessments if a.target_id in target_ids]
-        return filtered if filtered or not all_assessments else all_assessments
+        return [a for a in all_assessments if a.target_id in target_ids]
+
+    def export_report_markdown(
+        self,
+        investigation_id: str,
+        report_id: str | None = None,
+    ) -> str:
+        """Render complete forensic report as structured, timestamp-based Markdown deliverable."""
+        inv = self.get_investigation(investigation_id)
+        report = self.repository.get_report(report_id) if report_id else self.get_report(investigation_id)
+        if report is None:
+            raise ValueError(f"No report available for investigation '{investigation_id}'.")
+
+        events = self.get_events(investigation_id)
+        obs = self.get_observations(investigation_id)
+        coverages = self.get_coverage_records(investigation_id)
+        artifacts = self.get_artifacts(investigation_id)
+        assessments = self.get_evidence_assessments(investigation_id)
+        audit_logs = self.get_audit_logs(investigation_id)
+        media_assets = [
+            self.repository.get_media_asset(mid)
+            for mid in inv.media_asset_ids
+            if mid in [m.media_asset_id for m in self.repository.list_media_assets()]
+        ]
+
+        return ReportExporter.export_markdown(
+            investigation=inv,
+            report=report,
+            events=events,
+            observations=obs,
+            assessments=assessments,
+            coverages=coverages,
+            artifacts=artifacts,
+            audit_logs=audit_logs,
+            media_assets=media_assets,
+        )
 
     def create_demo_investigation(self) -> tuple[Investigation, IngestionResult]:
         """Seed a realistic forensic investigation with synthetic footage, frames, observations, and events."""

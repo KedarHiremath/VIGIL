@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import http
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -62,6 +64,24 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # HTTP request/response logging middleware with colour-coded status output code context
+    @app.middleware("http")
+    async def request_logging_middleware(request: Request, call_next):
+        start_time = time.perf_counter()
+        response = await call_next(request)
+        process_time_ms = (time.perf_counter() - start_time) * 1000.0
+        code = response.status_code
+        try:
+            phrase = http.HTTPStatus(code).phrase.upper()
+        except ValueError:
+            phrase = "RESPONSE"
+        client_host = request.client.host if request.client else "127.0.0.1"
+        access_log = logging.getLogger("vigil.access")
+        access_log.info(
+            f'{client_host} - "{request.method} {request.url.path}" {code} {phrase} ({process_time_ms:.1f}ms)'
+        )
+        return response
 
     # Global Exception Handlers
     @app.exception_handler(EntityNotFoundError)
