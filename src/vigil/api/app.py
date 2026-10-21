@@ -19,7 +19,12 @@ from vigil.api.dependencies import (
 )
 from vigil.api.routes.investigations import router as investigations_router
 from vigil.api.routes.websocket import router as websocket_router
+from vigil.logging_config import configure_logging
 from vigil.storage.repository import EntityNotFoundError
+
+# Install timestamped logging as early as possible so every module that
+# calls logging.getLogger(__name__) inherits the correct formatter.
+configure_logging()
 
 logger = logging.getLogger(__name__)
 

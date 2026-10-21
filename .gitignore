@@ -1,12 +1,57 @@
+# Environment variables
 .env
+.env.*
+!.env.example
 
-# Python bytecode and cache
+# Python bytecode, builds, and caches
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
 
-# Virtual environment
+# Virtual environments
 .venv/
+env/
+venv/
 
-# Test and lint caches
+# Test, typing, and lint caches
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# VIGIL Runtime storage, artifacts, and databases
+storage_data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Large media, temporary uploads, clips, frames, audio
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.wav
+*.mp3
+*.flac
+*.aac
+
+# Exported reports & scratch files
+report_*.pdf
+report_*.html
+report_*.md
+
+# IDE & OS metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

@@ -481,8 +481,8 @@ class SqliteInvestigationRepository(InvestigationRepository):
                 """,
                 (
                     link.event_link_id,
-                    link.source_event_id,
-                    link.target_event_id,
+                    link.from_event_id,
+                    link.to_event_id,
                     link.relationship_type,
                     link.model_dump_json(),
                 ),

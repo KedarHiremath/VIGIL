@@ -49,31 +49,44 @@ class VisualDetectorWorker(BaseToolWorker):
                 "'entity_type' (person/vehicle/animal/object/unknown), 'label', and 'attributes'."
             )
 
-            response = self.llm.analyze_image(
-                prompt=prompt,
-                image_data=artifact.storage_uri,
-                mime_type="image/jpeg",
-                json_mode=True,
-            )
+            try:
+                response = self.llm.analyze_image(
+                    prompt=prompt,
+                    image_data=artifact.storage_uri,
+                    mime_type="image/jpeg",
+                    json_mode=True,
+                )
+                raw_content = response.content
+            except Exception as exc:  # noqa: BLE001
+                # A single frame failing (e.g. transient timeout after retries)
+                # should not abort all remaining frames. Log and emit a fallback
+                # observation so the investigation can still progress.
+                logger.warning(
+                    "VisualDetectorWorker: frame %s failed (%s); using fallback observation.",
+                    art_id,
+                    exc,
+                )
+                raw_content = ""
 
             # Parse findings
             observations_data: list[dict[str, Any]] = []
-            try:
-                parsed = json.loads(response.content)
-                if isinstance(parsed, dict) and "observations" in parsed:
-                    observations_data = parsed["observations"]
-                elif isinstance(parsed, list):
-                    observations_data = parsed
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-                # Graceful extraction
-                observations_data = [
-                    {
-                        "observation_type": "visual_detection",
-                        "description": response.content[:200].strip()
-                        or "Visual features detected in frame.",
-                        "confidence": 0.85,
-                    }
-                ]
+            if raw_content:
+                try:
+                    parsed = json.loads(raw_content)
+                    if isinstance(parsed, dict) and "observations" in parsed:
+                        observations_data = parsed["observations"]
+                    elif isinstance(parsed, list):
+                        observations_data = parsed
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    # Graceful extraction
+                    observations_data = [
+                        {
+                            "observation_type": "visual_detection",
+                            "description": raw_content[:200].strip()
+                            or "Visual features detected in frame.",
+                            "confidence": 0.85,
+                        }
+                    ]
 
             if not observations_data:
                 observations_data = [
