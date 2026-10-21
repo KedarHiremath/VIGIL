@@ -29,13 +29,21 @@ from typing import Any
 
 from vigil.models.base import BaseLLMClient, LLMResponse
 
+# Cloudflare (error code 1010) blocks requests with the default Python-urllib
+# User-Agent. Use a browser-like UA so the Groq API edge passes the request.
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
 
 class GroqAPIError(RuntimeError):
     """Raised when Groq API returns an error."""
 
 
 class GroqClient(BaseLLMClient):
-    """Client for Groq Cloud Free Tier (Llama 3.3 70B, Llama 3.2 Vision, Whisper)."""
+    """Client for Groq Cloud Free Tier (GPT-OSS 20B reasoning, Whisper audio)."""
 
     def __init__(
         self,
@@ -70,6 +78,7 @@ class GroqClient(BaseLLMClient):
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.api_key}",
+                "User-Agent": _USER_AGENT,
             },
             method="POST",
         )

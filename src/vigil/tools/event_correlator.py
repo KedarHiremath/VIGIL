@@ -1,6 +1,7 @@
 """Temporal event correlation and relationship discovery worker."""
 
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -9,6 +10,8 @@ from vigil.domain.event import Event
 from vigil.domain.event_link import EventLink
 from vigil.orchestration.task_types import TaskRequest
 from vigil.tools.base import BaseToolWorker
+
+logger = logging.getLogger(__name__)
 
 
 class EventCorrelatorWorker(BaseToolWorker):
@@ -42,17 +45,23 @@ class EventCorrelatorWorker(BaseToolWorker):
             "(before/after/overlaps/related_to/possible_same_incident), and 'rationale'."
         )
 
-        response = self.llm.generate_text(prompt=prompt, json_mode=True)
-
         events_data: list[dict[str, Any]] = []
         links_data: list[dict[str, Any]] = []
 
         try:
-            parsed = json.loads(response.content)
-            if isinstance(parsed, dict):
-                events_data = parsed.get("events", [])
-                links_data = parsed.get("links", [])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            response = self.llm.generate_text(prompt=prompt, json_mode=True)
+            if response and response.content:
+                parsed = json.loads(response.content)
+                if isinstance(parsed, dict):
+                    events_data = parsed.get("events", [])
+                    links_data = parsed.get("links", [])
+                elif isinstance(parsed, list):
+                    events_data = parsed
+        except Exception as exc:
+            logger.warning(
+                "EventCorrelatorWorker: LLM correlation failed (%s); using fallback correlation.",
+                exc,
+            )
             events_data = []
 
         if not events_data:
@@ -89,6 +98,25 @@ class EventCorrelatorWorker(BaseToolWorker):
             ev_id = f"evt-{uuid.uuid4().hex[:8]}"
             now = datetime.now(UTC)
 
+            # Calculate start_seconds and end_seconds from supporting observations
+            start_sec_candidates: list[float] = []
+            end_sec_candidates: list[float] = []
+            for oid in valid_supporting_obs:
+                try:
+                    obs = self.repository.get_observation(oid)
+                    for sr in obs.source_references:
+                        if sr.start_seconds is not None:
+                            start_sec_candidates.append(sr.start_seconds)
+                        if sr.end_seconds is not None:
+                            end_sec_candidates.append(sr.end_seconds)
+                except Exception:
+                    pass
+
+            ev_start_sec = min(start_sec_candidates) if start_sec_candidates else None
+            ev_end_sec = max(end_sec_candidates) if end_sec_candidates else None
+            if ev_start_sec is not None and ev_end_sec is not None and ev_end_sec <= ev_start_sec:
+                ev_end_sec = ev_start_sec + 1.0
+
             event = Event(
                 event_id=ev_id,
                 event_type=str(ev_info.get("event_type", "incident_occurrence")),
@@ -100,6 +128,8 @@ class EventCorrelatorWorker(BaseToolWorker):
                 status="proposed",
                 start_time=now,
                 end_time=now,
+                start_seconds=ev_start_sec,
+                end_seconds=ev_end_sec,
             )
 
             self.repository.add_event(event)

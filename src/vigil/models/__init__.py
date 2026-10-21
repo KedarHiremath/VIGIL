@@ -6,6 +6,7 @@ from vigil.models.gemini import GeminiClient
 from vigil.models.groq import GroqClient
 from vigil.models.local import OpenAICompatibleClient
 from vigil.models.mock import MockLLMClient
+from vigil.models.nvidia_nim import NvidiaNIMClient
 
 __all__ = [
     "BaseLLMClient",
@@ -13,6 +14,7 @@ __all__ = [
     "GroqClient",
     "LLMResponse",
     "MockLLMClient",
+    "NvidiaNIMClient",
     "OpenAICompatibleClient",
     "get_llm_client",
 ]

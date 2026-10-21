@@ -34,19 +34,28 @@ def load_env_file(dotenv_path: Path | None = None) -> None:
 class VigilConfig:
     """Runtime configuration for VIGIL models, storage, and orchestration."""
 
-    llm_provider: str
-    gemini_api_key: str | None
-    gemini_model: str
-    groq_api_key: str | None
-    groq_reasoning_model: str
-    groq_vision_model: str
-    groq_audio_model: str
-    ollama_base_url: str
-    ollama_model: str
-    openrouter_api_key: str | None
-    openrouter_model: str
-    storage_root: str
-    log_level: str
+    llm_provider: str = "mock"
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.0-flash"
+    groq_api_key: str | None = None
+    groq_reasoning_model: str = "llama-3.3-70b-versatile"
+    groq_vision_model: str = "llama-3.2-11b-vision-preview"
+    groq_audio_model: str = "whisper-large-v3"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3.2-vision"
+    openrouter_api_key: str | None = None
+    openrouter_model: str = "google/gemini-2.0-flash-exp:free"
+    # ------------------------------------------------------------------
+    # NVIDIA NIM (Cosmos 3 Nano Reasoner VLM + Nemotron 3 Nano 30B LLM)
+    # ------------------------------------------------------------------
+    nvidia_api_key: str | None = None
+    nvidia_vlm_model: str = "nvidia/cosmos3-nano-reasoner"
+    nvidia_llm_model: str = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+    nvidia_llm_base_url: str = "https://integrate.api.nvidia.com/v1"
+    nvidia_vlm_base_url: str = "https://ai.api.nvidia.com/v1"
+    # ------------------------------------------------------------------
+    storage_root: str = "./storage_data"
+    log_level: str = "INFO"
 
     @classmethod
     def from_env(cls) -> "VigilConfig":
@@ -56,11 +65,14 @@ class VigilConfig:
         gemini_key = os.getenv("GEMINI_API_KEY")
         groq_key = os.getenv("GROQ_API_KEY")
         openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        nvidia_key = os.getenv("NVIDIA_API_KEY")
 
         # Determine default provider intelligently
         provider = os.getenv("VIGIL_LLM_PROVIDER")
         if not provider:
-            if gemini_key:
+            if nvidia_key:
+                provider = "nvidia_nim"
+            elif gemini_key:
                 provider = "gemini"
             elif groq_key:
                 provider = "groq"
@@ -75,10 +87,10 @@ class VigilConfig:
             gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
             groq_api_key=groq_key,
             groq_reasoning_model=os.getenv(
-                "GROQ_REASONING_MODEL", "llama-3.3-70b-versatile"
+                "GROQ_REASONING_MODEL", "openai/gpt-oss-20b"
             ),
             groq_vision_model=os.getenv(
-                "GROQ_VISION_MODEL", "llama-3.2-11b-vision-preview"
+                "GROQ_VISION_MODEL", "openai/gpt-oss-20b"
             ),
             groq_audio_model=os.getenv("GROQ_AUDIO_MODEL", "whisper-large-v3"),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
@@ -86,6 +98,19 @@ class VigilConfig:
             openrouter_api_key=openrouter_key,
             openrouter_model=os.getenv(
                 "OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free"
+            ),
+            nvidia_api_key=nvidia_key,
+            nvidia_vlm_model=os.getenv(
+                "NVIDIA_VLM_MODEL", "nvidia/cosmos3-nano-reasoner"
+            ),
+            nvidia_llm_model=os.getenv(
+                "NVIDIA_LLM_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+            ),
+            nvidia_llm_base_url=os.getenv(
+                "NVIDIA_LLM_BASE_URL", "https://integrate.api.nvidia.com/v1"
+            ),
+            nvidia_vlm_base_url=os.getenv(
+                "NVIDIA_VLM_BASE_URL", "https://ai.api.nvidia.com/v1"
             ),
             storage_root=os.getenv("VIGIL_STORAGE_ROOT", "./storage_data"),
             log_level=os.getenv("VIGIL_LOG_LEVEL", "INFO"),

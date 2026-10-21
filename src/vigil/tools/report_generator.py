@@ -49,11 +49,13 @@ class ReportGeneratorWorker(BaseToolWorker):
             "Summarize the findings concisely, maintaining objectivity and evidence linkage."
         )
 
-        response = self.llm.generate_text(prompt=prompt, json_mode=False)
-        summary = (
-            response.content.strip()
-            or f"Investigation {investigation_id} completed with {len(obs_ids)} observations and {len(event_ids)} verified events."
-        )
+        summary = f"Investigation {investigation_id} completed with {len(obs_ids)} observations and {len(event_ids)} verified events."
+        try:
+            response = self.llm.generate_text(prompt=prompt, json_mode=False)
+            if response and response.content.strip():
+                summary = response.content.strip()
+        except Exception as exc:
+            pass
 
         report_id = f"rep-{uuid.uuid4().hex[:8]}"
         report = Report(

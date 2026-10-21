@@ -379,18 +379,42 @@
     }
   }
 
-  function activateAgentChip(eventType) {
-    const chips = {
-      plan_created: "chip-planner",
-      task_started: "chip-visual",
-      observation_detected: "chip-visual",
-      event_correlated: "chip-temporal",
-      coverage_updated: "chip-verifier",
-      report_finalized: "chip-reporter",
-      investigation_completed: "chip-reporter",
-    };
+  function activateAgentChip(msg) {
+    let targetId = null;
+    const evtType = typeof msg === "string" ? msg : (msg?.event_type || "");
+    const data = typeof msg === "object" ? msg?.data : null;
 
-    const targetId = chips[eventType];
+    if (evtType === "plan_created") {
+      targetId = "chip-planner";
+    } else if (evtType === "task_started") {
+      const taskType = data?.task_type || "";
+      if (taskType === "audio_transcription") {
+        targetId = "chip-audio";
+      } else if (taskType === "visual_analysis" || taskType === "frame_sampling") {
+        targetId = "chip-visual";
+      } else if (taskType === "event_correlation") {
+        targetId = "chip-temporal";
+      } else if (taskType === "evidence_assessment" || taskType === "coverage_evaluation") {
+        targetId = "chip-verifier";
+      } else if (taskType === "report_generation") {
+        targetId = "chip-reporter";
+      } else {
+        targetId = "chip-visual";
+      }
+    } else if (evtType === "observation_detected") {
+      if (data?.observation?.modality === "audio") {
+        targetId = "chip-audio";
+      } else {
+        targetId = "chip-visual";
+      }
+    } else if (evtType === "event_correlated") {
+      targetId = "chip-temporal";
+    } else if (evtType === "coverage_updated") {
+      targetId = "chip-verifier";
+    } else if (evtType === "report_finalized" || evtType === "investigation_completed") {
+      targetId = "chip-reporter";
+    }
+
     if (targetId) {
       const chip = document.getElementById(targetId);
       if (chip) {
@@ -778,15 +802,36 @@
   // -------------------------------------------------------------------------
   function renderArtifacts() {
     const frames = state.artifacts.filter(a => a.media_type === "image");
+    const audioArtifacts = state.artifacts.filter(a => a.media_type === "audio");
     const clips = state.artifacts.filter(a => a.artifact_type in { clip: 1, subclip: 1, video_clip: 1 });
 
     el.framesCount.textContent = frames.length;
     el.clipsCount.textContent = clips.length;
 
-    // Render Frames
+    // Render Audio Trail & Frames
     el.frameGallery.innerHTML = "";
-    if (frames.length === 0) {
-      el.frameGallery.innerHTML = `<div class="gallery-empty">No frames extracted yet.</div>`;
+
+    // Display Audio Trail if extracted
+    if (audioArtifacts.length > 0) {
+      audioArtifacts.forEach((aud) => {
+        const audioBox = document.createElement("div");
+        audioBox.className = "audio-artifact-banner";
+        audioBox.style.cssText = "width:100%; display:flex; align-items:center; gap:12px; background:rgba(192, 132, 252, 0.12); border:1px solid rgba(192, 132, 252, 0.35); padding:10px 16px; border-radius:8px; margin-bottom:12px;";
+        const dur = aud.source_reference?.end_seconds ? `${aud.source_reference.end_seconds.toFixed(1)}s` : "Extracted";
+        audioBox.innerHTML = `
+          <span style="font-size:1.5rem;">&#x1F3A7;</span>
+          <div style="flex:1;">
+            <div style="font-weight:600; color:#c084fc; font-size:0.85rem; letter-spacing:0.5px;">AUDIO TRAIL &bull; ${aud.artifact_id}</div>
+            <div style="font-size:0.75rem; color:var(--text-dim); margin-top:2px;">Demuxed 16-bit PCM Audio Track (${dur}) &bull; Forensic Acoustic Stream</div>
+          </div>
+          <audio controls preload="metadata" style="height:32px; outline:none;" src="/api/v1/investigations/${state.activeInvestigationId}/artifacts/${aud.artifact_id}/content"></audio>
+        `;
+        el.frameGallery.appendChild(audioBox);
+      });
+    }
+
+    if (frames.length === 0 && audioArtifacts.length === 0) {
+      el.frameGallery.innerHTML = `<div class="gallery-empty">No frames or audio extracted yet.</div>`;
     } else {
       frames.forEach((f) => {
         const card = document.createElement("div");
