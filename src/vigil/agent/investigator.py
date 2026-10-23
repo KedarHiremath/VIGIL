@@ -1,4 +1,4 @@
-"""Agentic Orchestrator and Lead Investigator coordinating multi-phase video forensics."""
+﻿"""Agentic Orchestrator and Lead Investigator coordinating multi-phase video forensics."""
 
 import logging
 from collections.abc import Callable
@@ -27,6 +27,7 @@ from vigil.orchestration.investigation_state import (
 )
 from vigil.orchestration.service import OrchestrationService, TaskExecutionOutcome
 from vigil.orchestration.task_types import TaskRequest, TaskResult, TaskStatus
+from vigil.orchestration.transitions import transition_state
 from vigil.storage.repository import InvestigationRepository
 
 logger = logging.getLogger(__name__)
@@ -270,24 +271,51 @@ class AgenticOrchestrator:
                     },
                 )
 
-            # If task failed, stop the investigation pipeline
+            # Only abort on fatal task failures; non-critical phases log and continue.
+            # frame_sampling is fatal — without extracted frames, nothing else can proceed.
+            # All other phases (visual_analysis, audio, correlation, assessment, report)
+            # produce graceful fallback outputs on failure and should not halt the pipeline.
+            _FATAL_TASK_TYPES = frozenset({"frame_sampling"})
             if outcome.task_result.status == TaskStatus.FAILED:
+                is_fatal = task_req.task_type in _FATAL_TASK_TYPES
                 logger.error(
-                    f"Investigation task {task_req.task_id} failed: "
-                    f"{outcome.task_result.error}"
+                    "Investigation task %s (%s) failed%s: %s",
+                    task_req.task_id,
+                    task_req.task_type,
+                    " [FATAL — stopping pipeline]" if is_fatal else " [non-critical — continuing]",
+                    outcome.task_result.error,
                 )
                 if event_callback:
                     event_callback(
-                        "investigation_failed",
+                        "task_failed",
                         {
                             "investigation_id": investigation.investigation_id,
                             "failed_task_id": task_req.task_id,
+                            "task_type": task_req.task_type,
+                            "fatal": is_fatal,
                             "error": outcome.task_result.error.message
                             if outcome.task_result.error
                             else "Task execution failed",
                         },
                     )
-                break
+                if is_fatal:
+                    if event_callback:
+                        event_callback(
+                            "investigation_failed",
+                            {
+                                "investigation_id": investigation.investigation_id,
+                                "failed_task_id": task_req.task_id,
+                                "error": outcome.task_result.error.message
+                                if outcome.task_result.error
+                                else "Task execution failed",
+                            },
+                        )
+                    break
+                # Non-fatal failure: reset investigation state from FAILED back to RUNNING
+                # so that subsequent tasks can still execute.
+                if state.status == InvestigationStatus.FAILED:
+                    state = transition_state(state, InvestigationStatus.RUNNING)
+                    self.repository.save_state(state)
 
         # If all tasks succeeded or yielded partial results, complete the investigation
         final_report: Report | None = None

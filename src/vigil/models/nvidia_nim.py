@@ -1,4 +1,4 @@
-"""NVIDIA NIM client for hosted VLM and LLM inference.
+﻿"""NVIDIA NIM client for hosted VLM and LLM inference.
 
 Dual-model design
 -----------------
@@ -28,11 +28,16 @@ calls to a single in-flight request at a time, preventing the free-tier
 "Worker local total request limit" exhaustion (``ResourceExhausted 503``).
 
 After every successful call a mandatory inter-request cool-down is observed
-(``VIGIL_NVIDIA_INTER_REQUEST_DELAY`` env var, default 2 s) to keep the
+(``VIGIL_NVIDIA_INTER_REQUEST_DELAY`` env var, default 3.5 s) to keep the
 per-minute request rate well under quota.
 
 All transient HTTP errors (429, 500–504) and socket-level failures trigger
 exponential back-off with full jitter (up to ``_MAX_BACKOFF_SECONDS``).
+
+A per-call ``lock_acquire_timeout`` (default 600 s) prevents a slow or
+retrying request from blocking the queue indefinitely: if the lock cannot
+be acquired within that window the call raises ``NvidiaNIMError`` immediately
+so the pipeline worker can log and move on.
 """
 
 from __future__ import annotations
@@ -90,16 +95,30 @@ _MAX_BACKOFF_SECONDS: float = 60.0
 #      before releasing the lock, spreading calls across the minute window.
 #   3. On 503/429 we apply full-jitter exponential back-off starting from a
 #      MINIMUM of 5 s so we give the worker pool time to drain.
+#   4. A lock acquisition timeout prevents indefinite blocking when many
+#      pipeline tasks are queued simultaneously.
 
 _api_lock: threading.Lock = threading.Lock()
 
-_INTER_REQUEST_DELAY: float = 2.0  # seconds between requests (success path)
+_INTER_REQUEST_DELAY: float = 3.5  # seconds between requests (success path)
 try:
-    _INTER_REQUEST_DELAY = float(os.getenv("VIGIL_NVIDIA_INTER_REQUEST_DELAY", "2.0"))
+    _INTER_REQUEST_DELAY = float(os.getenv("VIGIL_NVIDIA_INTER_REQUEST_DELAY", "3.5"))
 except (TypeError, ValueError):
     pass
 
 _MIN_RETRY_DELAY: float = 5.0  # minimum back-off on first retry
+
+# How long (seconds) a call will wait to acquire _api_lock before giving up.
+# This prevents an indefinitely-blocking queue when upstream is very slow.
+_LOCK_ACQUIRE_TIMEOUT: float = 600.0
+try:
+    _LOCK_ACQUIRE_TIMEOUT = float(os.getenv("VIGIL_NVIDIA_LOCK_TIMEOUT", "600.0"))
+except (TypeError, ValueError):
+    pass
+
+# Observability: count requests queued behind the global lock
+_requests_waiting: int = 0
+_requests_waiting_lock: threading.Lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +130,9 @@ def _ensure_base64_image(image_data: str) -> str:
 
     If ``image_data`` is already a base64 string (or an ``http(s)://`` URL),
     it is returned unchanged.
+
+    Returns ``None`` if the path cannot be resolved to an existing file,
+    allowing callers to skip unresolvable images gracefully.
     """
     try:
         if image_data.startswith("file://"):
@@ -122,8 +144,17 @@ def _ensure_base64_image(image_data: str) -> str:
             p = Path(path_str)
             if p.is_file():
                 return base64.b64encode(p.read_bytes()).decode("utf-8")
-        elif Path(image_data).is_file():
-            return base64.b64encode(Path(image_data).read_bytes()).decode("utf-8")
+            # File URI but no file on disk — signal failure
+            logger.warning(
+                "NvidiaNIMClient: image file not found at resolved path '%s' (URI: %s)",
+                path_str,
+                image_data,
+            )
+            return ""
+        p = Path(image_data)
+        if p.is_file():
+            return base64.b64encode(p.read_bytes()).decode("utf-8")
+        # Plain string that is not an existing path — may already be base64
     except Exception:  # noqa: BLE001
         pass
     return image_data
@@ -250,6 +281,10 @@ class NvidiaNIMClient(BaseLLMClient):
         at a time) and separated by ``_INTER_REQUEST_DELAY`` seconds on
         success to prevent ResourceExhausted / worker-pool exhaustion.
 
+        If the lock cannot be acquired within ``_LOCK_ACQUIRE_TIMEOUT``
+        seconds, raises ``NvidiaNIMError`` immediately so the queued pipeline
+        task can fail gracefully without blocking everything else.
+
         Args:
             model: The model identifier string (VLM or LLM).
             base_url: The NIM base URL for this model family.
@@ -262,7 +297,8 @@ class NvidiaNIMClient(BaseLLMClient):
             Parsed ``LLMResponse`` with content and token counts.
 
         Raises:
-            NvidiaNIMError: On unrecoverable API or network failures.
+            NvidiaNIMError: On unrecoverable API or network failures, or if
+                the lock cannot be acquired within the timeout window.
         """
         url = f"{base_url.rstrip('/')}/chat/completions"
 
@@ -282,61 +318,92 @@ class NvidiaNIMClient(BaseLLMClient):
         last_exc: Exception | None = None
         resp_data: dict[str, Any] = {}
 
-        # Serialise ALL outbound calls through the global lock.
-        # One request in-flight at a time prevents worker-pool exhaustion.
-        with _api_lock:
-            for attempt in range(self.max_retries + 1):
-                if attempt > 0:
-                    delay = self._backoff_delay(attempt)
-                    logger.warning(
-                        "NvidiaNIMClient: attempt %d/%d failed (%s); retrying in %.1fs",
-                        attempt,
-                        self.max_retries,
-                        last_exc,
-                        delay,
-                    )
-                    time.sleep(delay)
+        # Track queue depth for observability
+        global _requests_waiting
+        with _requests_waiting_lock:
+            _requests_waiting += 1
+            queue_pos = _requests_waiting
 
-                req = urllib.request.Request(
-                    url,
-                    data=data,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Accept": "application/json",
-                    },
-                    method="POST",
+        if queue_pos > 1:
+            logger.info(
+                "NvidiaNIMClient: request queued — %d request(s) ahead in the "
+                "serialisation queue (model=%s). "
+                "Estimated wait ≥ %.0fs.",
+                queue_pos - 1,
+                model,
+                (queue_pos - 1) * (_INTER_REQUEST_DELAY + self.timeout_seconds / 4),
+            )
+
+        try:
+            # Attempt to acquire the global serialisation lock with a timeout
+            # so a stuck upstream request cannot block the pipeline indefinitely.
+            lock_acquired = _api_lock.acquire(timeout=_LOCK_ACQUIRE_TIMEOUT)
+            if not lock_acquired:
+                raise NvidiaNIMError(
+                    f"NvidiaNIMClient: could not acquire API lock within "
+                    f"{_LOCK_ACQUIRE_TIMEOUT:.0f}s — upstream may be stalled. "
+                    f"Request for model '{model}' dropped."
                 )
 
-                try:
-                    with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
-                        resp_data = json.loads(resp.read().decode("utf-8"))
-                    # Mandatory cool-down between successful requests
-                    if _INTER_REQUEST_DELAY > 0:
-                        time.sleep(_INTER_REQUEST_DELAY)
-                    break  # success — exit retry loop
-                except urllib.error.HTTPError as exc:
-                    err_body = exc.read().decode("utf-8", errors="replace")
-                    if exc.code in _RETRYABLE_HTTP_CODES and attempt < self.max_retries:
-                        last_exc = RuntimeError(
-                            f"HTTP {exc.code}: {exc.reason} — {err_body[:200]}"
+            try:
+                for attempt in range(self.max_retries + 1):
+                    if attempt > 0:
+                        delay = self._backoff_delay(attempt)
+                        logger.warning(
+                            "NvidiaNIMClient: attempt %d/%d failed (%s); retrying in %.1fs",
+                            attempt,
+                            self.max_retries,
+                            last_exc,
+                            delay,
                         )
-                        continue
-                    raise NvidiaNIMError(
-                        f"NVIDIA NIM API error {exc.code}: {err_body}"
-                    ) from exc
-                except OSError as exc:
-                    # Covers socket.timeout, TimeoutError, ConnectionResetError, etc.
-                    last_exc = exc
-                    if attempt < self.max_retries:
-                        continue
-                    raise NvidiaNIMError(
-                        f"NVIDIA NIM network failure: {exc}"
-                    ) from exc
-                except Exception as exc:
-                    raise NvidiaNIMError(
-                        f"NVIDIA NIM unexpected error: {exc}"
-                    ) from exc
+                        time.sleep(delay)
+
+                    req = urllib.request.Request(
+                        url,
+                        data=data,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Accept": "application/json",
+                        },
+                        method="POST",
+                    )
+
+                    try:
+                        with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
+                            resp_data = json.loads(resp.read().decode("utf-8"))
+                        # Mandatory cool-down between successful requests
+                        if _INTER_REQUEST_DELAY > 0:
+                            time.sleep(_INTER_REQUEST_DELAY)
+                        break  # success — exit retry loop
+                    except urllib.error.HTTPError as exc:
+                        err_body = exc.read().decode("utf-8", errors="replace")
+                        if exc.code in _RETRYABLE_HTTP_CODES and attempt < self.max_retries:
+                            last_exc = RuntimeError(
+                                f"HTTP {exc.code}: {exc.reason} — {err_body[:200]}"
+                            )
+                            continue
+                        raise NvidiaNIMError(
+                            f"NVIDIA NIM API error {exc.code}: {err_body}"
+                        ) from exc
+                    except OSError as exc:
+                        # Covers socket.timeout, TimeoutError, ConnectionResetError, etc.
+                        last_exc = exc
+                        if attempt < self.max_retries:
+                            continue
+                        raise NvidiaNIMError(
+                            f"NVIDIA NIM network failure: {exc}"
+                        ) from exc
+                    except Exception as exc:
+                        raise NvidiaNIMError(
+                            f"NVIDIA NIM unexpected error: {exc}"
+                        ) from exc
+            finally:
+                _api_lock.release()
+
+        finally:
+            with _requests_waiting_lock:
+                _requests_waiting -= 1
 
         # Parse response
         choices = resp_data.get("choices", [])
@@ -417,12 +484,20 @@ class NvidiaNIMClient(BaseLLMClient):
 
         Returns:
             ``LLMResponse`` with the visual analysis and token usage.
+
+        Raises:
+            NvidiaNIMError: If the image cannot be resolved or the API fails.
         """
         # Resolve file path / URI → base64; leave http(s) URLs untouched.
         if image_data.startswith("http://") or image_data.startswith("https://"):
             image_url_value = image_data
         else:
             b64 = _ensure_base64_image(image_data)
+            if not b64:
+                # File path could not be resolved — raise so callers can handle
+                raise NvidiaNIMError(
+                    f"analyze_image: image file not found or unreadable: '{image_data}'"
+                )
             image_url_value = f"data:{mime_type};base64,{b64}"
 
         messages: list[dict[str, Any]] = []

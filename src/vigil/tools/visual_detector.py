@@ -84,29 +84,66 @@ class VisualDetectorWorker(BaseToolWorker):
 
         for art_id in artifact_ids:
             artifact = self.repository.get_artifact(art_id)
-            prompt = (
-                f"Forensic visual analysis. {obj_context}"
-                "Identify all persons, vehicles, objects, and activities visible in this frame. "
-                "Output JSON with a list of 'observations', each having: "
-                "'observation_type', 'description', 'confidence', and optional 'entity' with "
-                "'entity_type' (person/vehicle/animal/object/unknown), 'label', and 'attributes'."
-            )
 
-            try:
-                response = self.llm.analyze_image(
-                    prompt=prompt,
-                    image_data=artifact.storage_uri,
-                    mime_type="image/jpeg",
-                    json_mode=True,
-                )
-                raw_content = response.content
-            except Exception as exc:  # noqa: BLE001
+            # ------------------------------------------------------------------
+            # Validate the artifact storage URI before dispatching to the VLM.
+            # Synthetic / mock URIs (e.g. file:///storage/artifacts/…) that do
+            # not resolve to a real file on disk cannot be base64-encoded and
+            # would cause the API call to fail.  Skip them with a fallback
+            # observation so the rest of the queue is unaffected.
+            # ------------------------------------------------------------------
+            uri = artifact.storage_uri
+            _is_resolvable = False
+            if uri.startswith("http://") or uri.startswith("https://"):
+                _is_resolvable = True
+            else:
+                from urllib.parse import unquote, urlparse as _urlparse
+                from pathlib import Path as _Path
+                try:
+                    if uri.startswith("file://"):
+                        _parsed = _urlparse(uri)
+                        _pstr = unquote(_parsed.path)
+                        if _pstr.startswith("/") and len(_pstr) > 2 and _pstr[2] == ":":
+                            _pstr = _pstr[1:]
+                        _is_resolvable = _Path(_pstr).is_file()
+                    else:
+                        _is_resolvable = _Path(uri).is_file()
+                except Exception:
+                    _is_resolvable = False
+
+            if not _is_resolvable:
                 logger.warning(
-                    "VisualDetectorWorker: frame %s failed (%s); using fallback observation.",
+                    "VisualDetectorWorker: artifact %s has unresolvable storage URI '%s'; "
+                    "skipping VLM call and recording placeholder observation.",
                     art_id,
-                    exc,
+                    uri,
                 )
                 raw_content = ""
+            else:
+                prompt = (
+                    f"Forensic visual analysis. {obj_context}"
+                    "Identify all persons, vehicles, objects, and activities visible in this frame. "
+                    "Output JSON with a list of 'observations', each having: "
+                    "'observation_type', 'description', 'confidence', and optional 'entity' with "
+                    "'entity_type' (person/vehicle/animal/object/unknown), 'label', and 'attributes'."
+                )
+
+                try:
+                    response = self.llm.analyze_image(
+                        prompt=prompt,
+                        image_data=uri,
+                        mime_type="image/jpeg",
+                        json_mode=True,
+                    )
+                    raw_content = response.content
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "VisualDetectorWorker: frame %s VLM call failed (%s); "
+                        "recording fallback observation — other frames will continue.",
+                        art_id,
+                        exc,
+                    )
+                    raw_content = ""
 
             # Parse findings
             observations_data: list[dict[str, Any]] = []

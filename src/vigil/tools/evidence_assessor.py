@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import uuid
 from typing import Any
@@ -70,6 +71,18 @@ class EvidenceAssessorWorker(BaseToolWorker):
                     target_ids = [o.observation_id for o in obs[:3]]
                 else:
                     raise ValueError("No targets available for evidence assessment.")
+
+        # Cap the number of API calls: assess at most 5 targets to avoid
+        # flooding the NVIDIA NIM free-tier queue with unbounded requests.
+        _MAX_ASSESSMENTS = int(os.environ.get("VIGIL_MAX_ASSESSMENTS", "5"))
+        if len(target_ids) > _MAX_ASSESSMENTS:
+            logger.info(
+                "EvidenceAssessorWorker: capping assessment targets from %d to %d "
+                "to respect API rate limits.",
+                len(target_ids),
+                _MAX_ASSESSMENTS,
+            )
+            target_ids = target_ids[:_MAX_ASSESSMENTS]
 
         assessor_name = str(
             request.parameters.get("assessed_by", "vigil-forensic-assessor")
