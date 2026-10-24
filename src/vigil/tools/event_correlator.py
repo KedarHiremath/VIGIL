@@ -58,6 +58,10 @@ class EventCorrelatorWorker(BaseToolWorker):
 
         observations = [self.repository.get_observation(oid) for oid in obs_ids]
 
+        # Lookup tables for camera and media metadata
+        media_map = {m.media_asset_id: m for m in self.repository.list_media_assets()}
+        camera_map = {c.camera_id: c for c in self.repository.list_cameras()}
+
         # Retrieve objective context
         obj_context = ""
         if investigation_id:
@@ -68,27 +72,42 @@ class EventCorrelatorWorker(BaseToolWorker):
             except Exception:
                 pass
 
-        # Correlate observations into events using LLM reasoning with timecode context
+        # Correlate observations into events using LLM reasoning with timecode and camera context
         obs_summary_lines = []
         for o in observations:
             sr = o.source_references[0] if o.source_references else None
             t_str = ""
-            if sr and sr.start_seconds is not None and sr.end_seconds is not None:
-                t_str = f"Timecode: [{_format_timecode(sr.start_seconds)} - {_format_timecode(sr.end_seconds)} ({sr.start_seconds:.1f}s-{sr.end_seconds:.1f}s)]"
-            elif sr and sr.start_seconds is not None:
-                t_str = f"Timecode: [{sr.start_seconds:.1f}s]"
+            cam_info = ""
+            if sr:
+                if sr.start_seconds is not None and sr.end_seconds is not None:
+                    t_str = f"Timecode: [{_format_timecode(sr.start_seconds)} - {_format_timecode(sr.end_seconds)} ({sr.start_seconds:.1f}s-{sr.end_seconds:.1f}s)]"
+                elif sr.start_seconds is not None:
+                    t_str = f"Timecode: [{sr.start_seconds:.1f}s]"
+                if sr.media_asset_id in media_map:
+                    asset = media_map[sr.media_asset_id]
+                    if asset.camera_id and asset.camera_id in camera_map:
+                        cam = camera_map[asset.camera_id]
+                        cam_info = f"Camera: {cam.camera_id} ({cam.location_label or cam.name}), "
+                    elif asset.camera_id:
+                        cam_info = f"Camera: {asset.camera_id}, "
+
             obs_summary_lines.append(
-                f"- ID: {o.observation_id}, Modality: {o.modality}, Type: {o.observation_type}, {t_str}, Desc: {o.description}"
+                f"- ID: {o.observation_id}, Modality: {o.modality}, Type: {o.observation_type}, {cam_info}{t_str}, Desc: {o.description}"
             )
         obs_summary = "\n".join(obs_summary_lines)
 
         prompt = (
-            f"You are a forensic video timeline analyst. Correlate the following observations into discrete chronological events.\n"
+            "You are a forensic multi-video timeline and premise analyst. "
+            "Correlate the following observations across all cameras and video feeds covering the premise into discrete chronological events.\n"
             f"{obj_context}"
-            f"Observations:\n{obs_summary}\n\n"
-            "Group temporally and logically related observations into distinct events. "
-            "Return JSON with 'events', each with: 'event_type', 'description', and 'observation_ids'. "
-            "Also optional 'links' with 'from_event_index', 'to_event_index', 'relationship_type' "
+            f"Observations from Premise Feeds:\n{obs_summary}\n\n"
+            "INSTRUCTIONS:\n"
+            "1. Group temporally and logically related observations into distinct forensic events.\n"
+            "2. For activities progressing across multiple cameras on the premise (e.g. subject moving from entrance to courtyard to interior), "
+            "synthesize cross-camera events connecting the trajectory, and reference observations from all involved cameras.\n"
+            "3. Clearly identify the camera locations in each event description.\n"
+            "4. Return JSON with 'events', each with: 'event_type', 'description', and 'observation_ids'.\n"
+            "5. Include 'links' between events with 'from_event_index', 'to_event_index', 'relationship_type' "
             "(before/after/overlaps/related_to/possible_same_incident), and 'rationale'."
         )
 
@@ -112,14 +131,42 @@ class EventCorrelatorWorker(BaseToolWorker):
             events_data = []
 
         if not events_data:
-            # Fallback: create a synthesized event grouping all current observations
-            events_data = [
-                {
-                    "event_type": "incident_occurrence",
-                    "description": "Correlated occurrence supported by visual and/or acoustic observations.",
-                    "observation_ids": obs_ids,
-                }
-            ]
+            # Fallback: group observations by media asset / camera or sequential clusters
+            obs_by_asset: dict[str, list[str]] = {}
+            for o in observations:
+                sr = o.source_references[0] if o.source_references else None
+                mid = sr.media_asset_id if sr else "default"
+                obs_by_asset.setdefault(mid, []).append(o.observation_id)
+
+            if len(obs_by_asset) > 1:
+                events_data = []
+                for mid, oids in obs_by_asset.items():
+                    asset = media_map.get(mid)
+                    cam_name = asset.camera_id if asset and asset.camera_id else mid
+                    events_data.append(
+                        {
+                            "event_type": "premise_activity_detected",
+                            "description": f"Correlated activity on premise feed '{cam_name}' supported by {len(oids)} observation(s).",
+                            "observation_ids": oids,
+                        }
+                    )
+                links_data = [
+                    {
+                        "from_event_index": i,
+                        "to_event_index": i + 1,
+                        "relationship_type": "before",
+                        "rationale": "Chronological progression across premise camera feeds.",
+                    }
+                    for i in range(len(events_data) - 1)
+                ]
+            else:
+                events_data = [
+                    {
+                        "event_type": "incident_occurrence",
+                        "description": "Correlated occurrence supported by visual and/or acoustic observations.",
+                        "observation_ids": obs_ids,
+                    }
+                ]
 
         created_event_ids: list[str] = []
         created_events: list[Event] = []

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 
 from vigil.domain.report import Report
@@ -90,6 +89,23 @@ class ReportGeneratorWorker(BaseToolWorker):
         coverages = self.repository.list_coverage_records(investigation_id)
         coverage_ids = [c.coverage_id for c in coverages]
 
+        # Gather all media assets and camera information
+        all_repo_assets = {m.media_asset_id: m for m in self.repository.list_media_assets()}
+        all_media = [all_repo_assets[mid] for mid in media_asset_ids if mid in all_repo_assets]
+        camera_map = {c.camera_id: c for c in self.repository.list_cameras()}
+
+        media_context_lines = []
+        for m in all_media:
+            cam_info = ""
+            if m.camera_id and m.camera_id in camera_map:
+                c = camera_map[m.camera_id]
+                cam_info = f" [Camera: {c.camera_id} - {c.location_label or c.name}]"
+            elif m.camera_id:
+                cam_info = f" [Camera: {m.camera_id}]"
+            dur_str = f"{m.duration_seconds:.1f}s" if m.duration_seconds else "N/A"
+            media_context_lines.append(f"- Media Asset '{m.media_asset_id}'{cam_info}: Duration {dur_str}")
+        media_context = "\n".join(media_context_lines) if media_context_lines else "- Single primary surveillance feed"
+
         # Chronological ordering of events
         sorted_events = sorted(
             events,
@@ -109,7 +125,7 @@ class ReportGeneratorWorker(BaseToolWorker):
         events_context = "\n".join(events_summary_lines) if events_summary_lines else "No discrete correlated events."
 
         obs_summary_lines: list[str] = []
-        for o in observations[:20]:
+        for o in observations[:25]:
             sr = o.source_references[0] if o.source_references else None
             t_str = ""
             if sr and sr.start_seconds is not None and sr.end_seconds is not None:
@@ -130,44 +146,48 @@ class ReportGeneratorWorker(BaseToolWorker):
 
         # Structured synthesis prompt
         prompt = (
-            f"You are a lead forensic investigator writing the official Executive Summary and Findings for a video-forensic report.\n\n"
+            "You are a lead forensic investigator writing the official Executive Summary and Findings for a video-forensic report.\n\n"
             f"CASE INFORMATION:\n"
             f"- Title: {inv_title}\n"
             f"- Investigation Objective: '{objective}'\n\n"
+            f"EXAMINED PREMISE CAMERA FEEDS ({len(all_media)} Feed(s)):\n"
+            f"{media_context}\n\n"
             f"EXAMINED EVIDENCE SCOPE (STRICT DATA FOR THIS CASE):\n"
             f"- Observations count: {len(obs_ids)}\n"
             f"- Correlated Events count: {len(event_ids)}\n"
             f"- Evidence Assessments count: {len(assessment_ids)}\n"
             f"- Coverage Records count: {len(coverage_ids)}\n\n"
-            f"CHRONOLOGICAL EVENT TIMELINE:\n{events_context}\n\n"
+            f"CHRONOLOGICAL EVENT TIMELINE (ACROSS PREMISE FEEDS):\n{events_context}\n\n"
             f"OBSERVATIONAL EVIDENCE:\n{obs_context}\n\n"
             f"EVIDENCE ASSESSMENTS:\n{assessments_context}\n\n"
-            f"INSTRUCTIONS:\n"
-            f"Write an authoritative, clear, and easy-to-interpret forensic investigation summary. "
-            f"Follow this exact structured format with markdown headers and bullet points:\n\n"
-            f"### 1. Objective Finding & Direct Answer\n"
+            "INSTRUCTIONS:\n"
+            "Write an authoritative, clear, and easy-to-interpret forensic investigation summary. "
+            "Follow this exact structured format with markdown headers and bullet points:\n\n"
+            "### 1. Objective Finding & Direct Answer\n"
             f"Provide a clear, decisive, and unambiguous answer to the Investigation Objective ('{objective}'). "
-            f"State the primary finding, counts of persons/entities, and verified conclusions immediately.\n\n"
-            f"### 2. Chronological Timeline Analysis\n"
-            f"Detail the sequence of occurrences in chronological order using timestamp intervals [MM:SS or seconds]. "
-            f"Correlate visual and acoustic observations with physical actions.\n\n"
-            f"### 3. Evidence Integrity & Confidence\n"
-            f"Summarize the evidence quality, support level, and certainty of the findings based on the verified data.\n\n"
-            f"STRICT RULES:\n"
+            "State the primary finding, counts of persons/entities, and verified conclusions immediately across all premise feeds.\n\n"
+            "### 2. Chronological Timeline Analysis\n"
+            "Detail the sequence of occurrences in chronological order using timestamp intervals [MM:SS or seconds]. "
+            "Highlight entity movement and progression across different camera viewpoints and locations on the premise. "
+            "Correlate visual and acoustic observations with physical actions.\n\n"
+            "### 3. Evidence Integrity & Confidence\n"
+            "Summarize the evidence quality, support level, and certainty of the findings based on the verified data.\n\n"
+            "STRICT RULES:\n"
             f"- DO NOT hallucinate records or counts. The total observations examined is exactly {len(obs_ids)}, "
             f"the discrete events is {len(event_ids)}, and assessments is {len(assessment_ids)}.\n"
-            f"- Strictly ground all conclusions in the timestamped evidence provided above."
+            "- Strictly ground all conclusions in the timestamped evidence provided above."
         )
 
         # Baseline fallback summary
+        feed_note = f" across {len(all_media)} camera feeds" if len(all_media) > 1 else ""
         summary = (
             f"### 1. Objective Finding & Direct Answer\n"
             f"Forensic investigation completed for objective: '{objective}'. Analysis identified {len(event_ids)} "
-            f"discrete events supported by {len(obs_ids)} observations.\n\n"
+            f"discrete events{feed_note} supported by {len(obs_ids)} observations.\n\n"
             f"### 2. Chronological Timeline Analysis\n"
             f"{events_context}\n\n"
             f"### 3. Evidence Integrity & Confidence\n"
-            f"Examination covered {len(coverage_ids)} source records with {len(assessment_ids)} formal evidence assessments."
+            f"Examination covered {len(coverage_ids)} source records across {len(all_media) or 1} surveillance feeds with {len(assessment_ids)} formal evidence assessments."
         )
 
         try:

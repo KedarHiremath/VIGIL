@@ -167,3 +167,68 @@ def test_investigation_service_errors(tmp_path: Path) -> None:
         service.get_report("unknown-inv-id")
 
     service.shutdown()
+
+
+def test_investigation_service_multi_video_sequential_ingestion(tmp_path: Path) -> None:
+    video_path_1 = tmp_path / "feed_north.mp4"
+    video_path_2 = tmp_path / "feed_courtyard.mp4"
+    create_test_video(video_path_1, duration_seconds=1.0, fps=24, with_audio=False)
+    create_test_video(video_path_2, duration_seconds=1.0, fps=24, with_audio=False)
+
+    repo = SqliteInvestigationRepository(":memory:")
+    telemetry = TelemetryManager()
+    service = InvestigationService(
+        repository=repo,
+        telemetry=telemetry,
+        storage_dir=tmp_path / "storage",
+    )
+    service.orchestrator.llm = MockLLMClient()
+
+    # Ingest multiple premise video feeds sequentially
+    inv, composite_result = service.create_and_ingest_investigation(
+        file_paths=[video_path_1, video_path_2],
+        camera_ids=["cam-north-01", "cam-courtyard-02"],
+        title="Multi-Feed Premise Breach Investigation",
+        objective="Correlate timeline across all premise cameras",
+        max_frames=4,
+    )
+
+    assert inv.investigation_id.startswith("inv-")
+    assert len(composite_result.all_ingestion_results) == 2
+    assert composite_result.media_asset.camera_id == "cam-north-01"
+    assert composite_result.additional_results[0].media_asset.camera_id == "cam-courtyard-02"
+
+    # Verify both MediaAssets registered under the investigation
+    assets = service.get_media_assets(inv.investigation_id)
+    assert len(assets) == 2
+    cam_ids = {a.camera_id for a in assets}
+    assert cam_ids == {"cam-north-01", "cam-courtyard-02"}
+
+    # Run investigation across multiple feeds
+    outcome = service.run_investigation(inv.investigation_id, run_async=False)
+    assert outcome is not None
+    assert outcome.state.status == InvestigationStatus.COMPLETED
+    assert outcome.report is not None
+
+    # Verify observations and coverage records cover both feeds
+    obs = service.get_observations(inv.investigation_id)
+    assert len(obs) > 0
+    cov = service.get_coverage_records(inv.investigation_id)
+    assert len(cov) >= 2
+
+    # Add a 3rd camera feed dynamically to the existing investigation
+    video_path_3 = tmp_path / "feed_gate.mp4"
+    create_test_video(video_path_3, duration_seconds=1.0, fps=24, with_audio=False)
+    res_3 = service.add_and_ingest_media(
+        inv.investigation_id,
+        file_path=video_path_3,
+        camera_id="cam-gate-03",
+        max_frames=2,
+    )
+    assert res_3.media_asset.camera_id == "cam-gate-03"
+
+    # Verify service now reports 3 feeds for this investigation
+    assets_after = service.get_media_assets(inv.investigation_id)
+    assert len(assets_after) == 3
+
+    service.shutdown()

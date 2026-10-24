@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -25,10 +25,20 @@ class IngestionResult:
     camera: Camera | None
     frame_artifacts: list[Artifact]
     audio_artifacts: list[Artifact]
+    additional_results: list[IngestionResult] = field(default_factory=list)
 
     @property
     def all_artifact_ids(self) -> list[str]:
-        return [a.artifact_id for a in self.frame_artifacts + self.audio_artifacts]
+        all_frames = list(self.frame_artifacts)
+        all_audios = list(self.audio_artifacts)
+        for res in self.additional_results:
+            all_frames.extend(res.frame_artifacts)
+            all_audios.extend(res.audio_artifacts)
+        return [a.artifact_id for a in all_frames + all_audios]
+
+    @property
+    def all_ingestion_results(self) -> list[IngestionResult]:
+        return [self] + list(self.additional_results)
 
 
 class MediaIngestionService:

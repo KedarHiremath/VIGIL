@@ -33,21 +33,22 @@ class CoverageTrackerWorker(BaseToolWorker):
             else:
                 source_ref_ids = ["src-media-001"]
 
-        # Collect artifacts strictly related to these sources
         all_artifacts = self.repository.list_artifacts()
-        artifact_ids = [
-            a.artifact_id
-            for a in all_artifacts
-            if a.source_reference and a.source_reference.media_asset_id in source_ref_ids
-        ]
-        if not artifact_ids and all_artifacts:
-            artifact_ids = [a.artifact_id for a in all_artifacts]
+        fallback_art_ids = [a.artifact_id for a in all_artifacts]
 
         output_coverage_ids: list[str] = []
         now = datetime.now(UTC)
 
         for s_ref_id in source_ref_ids:
             cov_id = f"cov-{uuid.uuid4().hex[:8]}"
+
+            # Filter artifacts strictly derived from this specific source media
+            source_artifacts = [
+                a.artifact_id
+                for a in all_artifacts
+                if a.source_reference and a.source_reference.media_asset_id == s_ref_id
+            ]
+            assigned_art_ids = source_artifacts if source_artifacts else fallback_art_ids
 
             rec = CoverageRecord(
                 coverage_id=cov_id,
@@ -58,7 +59,7 @@ class CoverageTrackerWorker(BaseToolWorker):
                 interval_end=now,
                 examined_at=now,
                 notes=f"Complete timeline examination performed for source '{s_ref_id}'.",
-                artifact_ids=artifact_ids,
+                artifact_ids=assigned_art_ids,
             )
 
             self.repository.add_coverage_record(rec)

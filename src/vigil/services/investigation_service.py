@@ -17,6 +17,7 @@ from vigil.domain.artifact import Artifact
 from vigil.domain.audit import AuditLog
 from vigil.domain.coverage import CoverageRecord
 from vigil.domain.event import Event
+from vigil.domain.event_link import EventLink
 from vigil.domain.evidence_assessment import EvidenceAssessment
 from vigil.domain.investigation import Investigation
 from vigil.domain.media_asset import MediaAsset
@@ -107,12 +108,14 @@ class InvestigationService:
 
     def create_and_ingest_investigation(
         self,
-        file_path: Path | str,
+        file_path: Path | str | None = None,
+        file_paths: list[Path | str] | None = None,
         investigation_id: str | None = None,
         title: str | None = None,
         objective: str | None = None,
         scope_description: str | None = None,
         camera_id: str | None = None,
+        camera_ids: list[str] | None = None,
         camera_name: str | None = None,
         camera_location: str | None = None,
         camera_timezone: str | None = None,
@@ -121,45 +124,88 @@ class InvestigationService:
         extract_audio: bool = True,
         created_by: str | None = None,
     ) -> tuple[Investigation, IngestionResult]:
-        """Ingest physical media file, register assets in repository, and create Investigation domain model."""
+        """Ingest one or more physical media files sequentially, register assets, and create Investigation."""
         inv_id = investigation_id or f"inv-{uuid.uuid4().hex[:8]}"
-        path = Path(file_path).resolve()
 
-        if not path.is_file():
-            raise FileNotFoundError(f"Source media file not found: {path}")
+        # Resolve paths
+        target_paths: list[Path] = []
+        if file_paths:
+            for p in file_paths:
+                resolved = Path(p).resolve()
+                if not resolved.is_file():
+                    raise FileNotFoundError(f"Source media file not found: {resolved}")
+                target_paths.append(resolved)
+        elif file_path:
+            resolved = Path(file_path).resolve()
+            if not resolved.is_file():
+                raise FileNotFoundError(f"Source media file not found: {resolved}")
+            target_paths.append(resolved)
+        else:
+            raise FileNotFoundError("At least one media file_path or file_paths must be specified.")
 
-        # Ingest media file into repository
         artifacts_dir = self.storage_dir / "artifacts" / inv_id
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-        ingestion_result = self.media_service.ingest_file(
-            file_path=path,
-            camera_id=camera_id,
-            camera_name=camera_name,
-            camera_location=camera_location,
-            camera_timezone=camera_timezone,
-            sample_interval_seconds=sample_interval_seconds,
-            max_frames=max_frames,
-            extract_audio=extract_audio,
-            output_artifacts_dir=artifacts_dir,
+        # Ingest each media file sequentially (following existing architecture)
+        ingestion_results: list[IngestionResult] = []
+        for idx, path in enumerate(target_paths):
+            if camera_ids and idx < len(camera_ids) and camera_ids[idx]:
+                curr_cam_id: str | None = camera_ids[idx]
+            elif camera_id:
+                curr_cam_id = camera_id if len(target_paths) == 1 else f"{camera_id}-{idx+1:02d}"
+            else:
+                curr_cam_id = f"cam-{idx+1:02d}"
+
+            curr_cam_name = (
+                f"{camera_name} (Feed {idx+1})"
+                if camera_name and len(target_paths) > 1
+                else (camera_name or f"Camera {curr_cam_id}")
+            )
+
+            res = self.media_service.ingest_file(
+                file_path=path,
+                camera_id=curr_cam_id,
+                camera_name=curr_cam_name,
+                camera_location=camera_location,
+                camera_timezone=camera_timezone,
+                sample_interval_seconds=sample_interval_seconds,
+                max_frames=max_frames,
+                extract_audio=extract_audio,
+                output_artifacts_dir=artifacts_dir,
+            )
+            ingestion_results.append(res)
+
+        primary_result = IngestionResult(
+            media_asset=ingestion_results[0].media_asset,
+            camera=ingestion_results[0].camera,
+            frame_artifacts=ingestion_results[0].frame_artifacts,
+            audio_artifacts=ingestion_results[0].audio_artifacts,
+            additional_results=ingestion_results[1:],
         )
 
         # Build investigation domain model
-        inv_title = title or f"Investigation: {path.name}"
+        if len(target_paths) > 1:
+            inv_title = title or f"Investigation: Multi-Camera Premise ({len(target_paths)} feeds)"
+            inv_scope = (
+                scope_description
+                or f"Multi-video forensic surveillance examination covering premise across {len(target_paths)} camera feeds"
+            )
+        else:
+            inv_title = title or f"Investigation: {target_paths[0].name}"
+            inv_scope = scope_description or f"Physical media footage analysis from {target_paths[0].name}"
+
         inv_objective = (
             objective or "Perform comprehensive forensic video and audio examination."
         )
-        inv_scope = (
-            scope_description
-            or f"Physical media footage analysis from {path.name}"
-        )
+
+        all_media_ids = [res.media_asset.media_asset_id for res in ingestion_results]
 
         investigation = Investigation(
             investigation_id=inv_id,
             title=inv_title,
             objective=inv_objective,
             scope_description=inv_scope,
-            media_asset_ids=[ingestion_result.media_asset.media_asset_id],
+            media_asset_ids=all_media_ids,
             created_by=created_by or "vigil-api-user",
         )
         self.repository.add_investigation(investigation)
@@ -171,6 +217,10 @@ class InvestigationService:
         )
         self.repository.save_state(initial_state)
 
+        total_frames = sum(len(r.frame_artifacts) for r in ingestion_results)
+        any_audio = any(len(r.audio_artifacts) > 0 for r in ingestion_results)
+        cam_ids = [r.camera.camera_id for r in ingestion_results if r.camera]
+
         # Broadcast creation event
         self.telemetry.broadcast(
             investigation_id=inv_id,
@@ -178,13 +228,76 @@ class InvestigationService:
             data={
                 "investigation_id": inv_id,
                 "title": inv_title,
-                "media_asset_id": ingestion_result.media_asset.media_asset_id,
-                "frame_count": len(ingestion_result.frame_artifacts),
-                "has_audio": len(ingestion_result.audio_artifacts) > 0,
+                "media_asset_id": primary_result.media_asset.media_asset_id,
+                "media_asset_ids": all_media_ids,
+                "media_count": len(all_media_ids),
+                "camera_ids": cam_ids,
+                "frame_count": total_frames,
+                "has_audio": any_audio,
             },
         )
 
-        return investigation, ingestion_result
+        return investigation, primary_result
+
+    def add_and_ingest_media(
+        self,
+        investigation_id: str,
+        file_path: Path | str,
+        camera_id: str | None = None,
+        camera_name: str | None = None,
+        camera_location: str | None = None,
+        camera_timezone: str | None = None,
+        sample_interval_seconds: float = 2.0,
+        max_frames: int = 50,
+        extract_audio: bool = True,
+    ) -> IngestionResult:
+        """Add and ingest an additional video feed into an existing investigation."""
+        inv = self.repository.get_investigation(investigation_id)
+        path = Path(file_path).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Source media file not found: {path}")
+
+        artifacts_dir = self.storage_dir / "artifacts" / investigation_id
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        curr_cam_id = camera_id or f"cam-{len(inv.media_asset_ids) + 1:02d}"
+        res = self.media_service.ingest_file(
+            file_path=path,
+            camera_id=curr_cam_id,
+            camera_name=camera_name or f"Camera {curr_cam_id}",
+            camera_location=camera_location,
+            camera_timezone=camera_timezone,
+            sample_interval_seconds=sample_interval_seconds,
+            max_frames=max_frames,
+            extract_audio=extract_audio,
+            output_artifacts_dir=artifacts_dir,
+        )
+
+        updated_media_ids = list(inv.media_asset_ids) + [res.media_asset.media_asset_id]
+        updated_inv = Investigation(
+            investigation_id=inv.investigation_id,
+            title=inv.title,
+            objective=inv.objective,
+            scope_description=inv.scope_description,
+            media_asset_ids=updated_media_ids,
+            source_reference_ids=inv.source_reference_ids,
+            created_at=inv.created_at,
+            created_by=inv.created_by,
+        )
+        self.repository.add_investigation(updated_inv)
+
+        self.telemetry.broadcast(
+            investigation_id=investigation_id,
+            event_type="media_added",
+            data={
+                "investigation_id": investigation_id,
+                "media_asset_id": res.media_asset.media_asset_id,
+                "camera_id": curr_cam_id,
+                "frame_count": len(res.frame_artifacts),
+                "total_media_count": len(updated_media_ids),
+            },
+        )
+        return res
 
     def run_investigation(
         self,
@@ -306,7 +419,7 @@ class InvestigationService:
         return [
             a
             for a in all_artifacts
-            if a.source_reference.media_asset_id in inv_asset_ids
+            if a.source_reference and a.source_reference.media_asset_id in inv_asset_ids
         ]
 
     # -------------------------------------------------------------------------
@@ -596,7 +709,7 @@ class InvestigationService:
             summary = (
                 f"{prev_summary}\n\n"
                 f"**Final Human Review Findings**: Investigation reviewed and finalized by {finalized_by}. "
-                f"A total of {len(events)} events were evaluated: {len(confirmed_events)} confirmed, "
+                f"A total of {len(events)} events were evaluated across premise feeds: {len(confirmed_events)} confirmed, "
                 f"{len(rejected_events)} rejected, and {len(proposed_events)} pending review."
             ).strip()
 
@@ -674,7 +787,8 @@ class InvestigationService:
         artifacts = self.get_artifacts(investigation_id)
         assessments = self.get_evidence_assessments(investigation_id)
         audit_logs = self.get_audit_logs(investigation_id)
-        media_assets = [self.repository.get_media_asset(mid) for mid in inv.media_asset_ids if mid in [m.media_asset_id for m in self.repository.list_media_assets()]]
+        all_assets = {m.media_asset_id: m for m in self.repository.list_media_assets()}
+        media_assets = [all_assets[mid] for mid in inv.media_asset_ids if mid in all_assets]
 
         return ReportExporter.export_html(
             investigation=inv,
@@ -706,7 +820,8 @@ class InvestigationService:
         artifacts = self.get_artifacts(investigation_id)
         assessments = self.get_evidence_assessments(investigation_id)
         audit_logs = self.get_audit_logs(investigation_id)
-        media_assets = [self.repository.get_media_asset(mid) for mid in inv.media_asset_ids if mid in [m.media_asset_id for m in self.repository.list_media_assets()]]
+        all_assets = {m.media_asset_id: m for m in self.repository.list_media_assets()}
+        media_assets = [all_assets[mid] for mid in inv.media_asset_ids if mid in all_assets]
 
         return ReportExporter.export_pdf(
             investigation=inv,
@@ -724,7 +839,6 @@ class InvestigationService:
         """Resolve artifact local disk path if it exists."""
         artifact = self.repository.get_artifact(artifact_id)
         return _uri_to_local_path(artifact.storage_uri)
-
 
     def get_media_assets(self, investigation_id: str) -> list[MediaAsset]:
         """Retrieve media assets associated with an investigation."""
@@ -763,11 +877,8 @@ class InvestigationService:
         artifacts = self.get_artifacts(investigation_id)
         assessments = self.get_evidence_assessments(investigation_id)
         audit_logs = self.get_audit_logs(investigation_id)
-        media_assets = [
-            self.repository.get_media_asset(mid)
-            for mid in inv.media_asset_ids
-            if mid in [m.media_asset_id for m in self.repository.list_media_assets()]
-        ]
+        all_assets = {m.media_asset_id: m for m in self.repository.list_media_assets()}
+        media_assets = [all_assets[mid] for mid in inv.media_asset_ids if mid in all_assets]
 
         return ReportExporter.export_markdown(
             investigation=inv,
@@ -782,7 +893,7 @@ class InvestigationService:
         )
 
     def create_demo_investigation(self) -> tuple[Investigation, IngestionResult]:
-        """Seed a realistic forensic investigation with synthetic footage, frames, observations, and events."""
+        """Seed a realistic multi-camera forensic case with two synchronized feeds covering the same premise."""
         import math
 
         import av
@@ -790,16 +901,19 @@ class InvestigationService:
 
         demo_dir = self.storage_dir / "demo"
         demo_dir.mkdir(parents=True, exist_ok=True)
-        video_path = demo_dir / "demo_perimeter_feed.mp4"
+        video1_path = demo_dir / "demo_north_gate_feed.mp4"
+        video2_path = demo_dir / "demo_courtyard_feed.mp4"
 
-        # Generate 6-second surveillance footage with timecode and crosshairs
         fps = 24
         duration_seconds = 6.0
         width = 640
         height = 360
         total_frames = int(duration_seconds * fps)
 
-        with av.open(str(video_path), mode="w", format="mp4") as container:
+        # -------------------------------------------------------------
+        # Generate Feed 1: North Perimeter Entrance Gate (cam-north-04)
+        # -------------------------------------------------------------
+        with av.open(str(video1_path), mode="w", format="mp4") as container:
             v_stream = container.add_stream("h264", rate=fps)
             v_stream.width = width
             v_stream.height = height
@@ -816,27 +930,23 @@ class InvestigationService:
             for i in range(total_frames):
                 t_sec = i / fps
                 img = np.zeros((height, width, 3), dtype=np.uint8)
-                # CCTV dark night surveillance aesthetic
                 img[:, :, :] = 18
-                # Ground grid lines
                 for y in range(180, height, 30):
                     img[y, :, :] = 35
                 for x in range(0, width, 50):
                     img[180:, x, :] = 35
 
-                # Security perimeter fence line (yellow/amber warning stripe)
+                # North Gate perimeter fence line (amber/yellow stripe)
                 img[175:180, :, 0] = 0
                 img[175:180, :, 1] = 180
                 img[175:180, :, 2] = 230
 
-                # Simulated intruder moving between t=1.0s and t=4.5s
-                if 1.0 <= t_sec <= 4.5:
-                    prog = (t_sec - 1.0) / 3.5
-                    px = int(120 + prog * 400)
-                    py = int(160 - math.sin(prog * math.pi) * 20)
-                    img[py:py+50, px:px+20, 0] = 220
-                    img[py:py+50, px:px+20, 1] = 220
-                    img[py:py+50, px:px+20, 2] = 220
+                # Suspect approaches gate (t=1.0 to 4.2s)
+                if 1.0 <= t_sec <= 4.2:
+                    prog = (t_sec - 1.0) / 3.2
+                    px = int(100 + prog * 420)
+                    py = int(160 - math.sin(prog * math.pi) * 18)
+                    img[py:py+50, px:px+20, :] = 220
 
                 frame = av.VideoFrame.from_ndarray(img, format="bgr24")
                 for packet in v_stream.encode(frame):
@@ -859,23 +969,85 @@ class InvestigationService:
             for packet in v_stream.encode():
                 container.mux(packet)
 
-        # Ingest the generated video
+        # -------------------------------------------------------------
+        # Generate Feed 2: Central Facility Courtyard (cam-courtyard-02)
+        # -------------------------------------------------------------
+        with av.open(str(video2_path), mode="w", format="mp4") as container:
+            v_stream2 = container.add_stream("h264", rate=fps)
+            v_stream2.width = width
+            v_stream2.height = height
+            v_stream2.pix_fmt = "yuv420p"
+
+            a_stream2 = None
+            try:
+                a_stream2 = container.add_stream("aac", rate=44100)
+                a_stream2.format = "fltp"
+                a_stream2.layout = "stereo"
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+            for i in range(total_frames):
+                t_sec = i / fps
+                img = np.zeros((height, width, 3), dtype=np.uint8)
+                img[:, :, :] = 22
+                # Courtyard floor grid (blue tinted courtyard stone)
+                for y in range(160, height, 25):
+                    img[y, :, 0] = 50
+                    img[y, :, 1] = 40
+                    img[y, :, 2] = 30
+                # Building entrance structure on right
+                img[130:260, 480:540, :] = 60
+                img[150:240, 500:525, 0] = 120
+                img[150:240, 500:525, 1] = 90
+
+                # Suspect emerges from north gate corridor at t=3.5s and crosses courtyard
+                if 3.5 <= t_sec <= 5.8:
+                    prog2 = (t_sec - 3.5) / 2.3
+                    px = int(80 + prog2 * 410)
+                    py = int(180 - math.sin(prog2 * math.pi) * 12)
+                    img[py:py+48, px:px+20, :] = 220
+
+                frame = av.VideoFrame.from_ndarray(img, format="bgr24")
+                for packet in v_stream2.encode(frame):
+                    container.mux(packet)
+
+            if a_stream2 is not None:
+                num_samples = int(duration_seconds * 44100)
+                t = np.linspace(0, duration_seconds, num_samples, dtype=np.float32)
+                courtyard_hum = np.sin(2 * math.pi * 120 * t) * 0.05
+                footsteps = np.where((t >= 4.0) & (t <= 4.6), np.sin(2 * math.pi * 300 * t) * 0.25, 0.0)
+                audio = (courtyard_hum + footsteps).astype(np.float32)
+                stereo = np.stack([audio, audio])
+                a_frame = av.AudioFrame.from_ndarray(stereo, format="fltp", layout="stereo")
+                a_frame.rate = 44100
+                for packet in a_stream2.encode(a_frame):
+                    container.mux(packet)
+                for packet in a_stream2.encode():
+                    container.mux(packet)
+
+            for packet in v_stream2.encode():
+                container.mux(packet)
+
+        # -------------------------------------------------------------
+        # Sequential Ingestion of Both Feeds into Unified Investigation
+        # -------------------------------------------------------------
         inv_id = f"inv-demo-{uuid.uuid4().hex[:6]}"
-        inv, result = self.create_and_ingest_investigation(
-            file_path=video_path,
+        inv, primary_result = self.create_and_ingest_investigation(
+            file_paths=[video1_path, video2_path],
             investigation_id=inv_id,
-            title="Operation Nightwatch: North Perimeter Intrusion Analysis",
-            objective="Identify unauthorized boundary breaches, classify acoustic anomalies, and correlate suspect trajectory.",
-            scope_description="Continuous PTZ surveillance footage from North Gate Sector 4",
-            camera_id="cam-north-04",
-            camera_name="North Perimeter PTZ Cam 04",
-            camera_location="Perimeter Sector 4 (North Border)",
-            camera_timezone="UTC",
+            title="Operation Nightwatch: North Perimeter & Courtyard Breach",
+            objective="Correlate unauthorized boundary breach across North Gate and Central Courtyard feeds, classify acoustic anomalies, and track suspect trajectory across premise.",
+            scope_description="Synchronized multi-camera CCTV feeds: North Perimeter Gate (cam-north-04) and Central Facility Courtyard (cam-courtyard-02)",
+            camera_ids=["cam-north-04", "cam-courtyard-02"],
             sample_interval_seconds=1.0,
             max_frames=6,
             extract_audio=True,
             created_by="Lead Det. Vance",
         )
+
+        all_results = primary_result.all_ingestion_results
+        res1 = all_results[0]
+        res2 = all_results[1] if len(all_results) > 1 else all_results[0]
 
         prov_vis = Provenance(
             producer_type="vision_model",
@@ -888,52 +1060,79 @@ class InvestigationService:
             method="audio_transcription",
         )
 
-        src_ref1 = SourceReference(media_asset_id=result.media_asset.media_asset_id, start_seconds=1.2, end_seconds=2.6)
+        # Observations for Feed 1 (North Gate)
+        src_ref1 = SourceReference(media_asset_id=res1.media_asset.media_asset_id, start_seconds=1.2, end_seconds=2.6)
         obs1 = Observation(
             observation_id=f"obs-{uuid.uuid4().hex[:6]}",
             modality="video",
             observation_type="person_detection",
-            description="Individual dressed in dark tactical gear approaching the perimeter boundary.",
+            description="[cam-north-04: North Perimeter Sector 4] Individual dressed in dark tactical gear approaching perimeter boundary.",
             source_references=[src_ref1],
             confidence=0.96,
             provenance=prov_vis,
         )
         self.repository.add_observation(obs1)
 
-        src_ref2 = SourceReference(media_asset_id=result.media_asset.media_asset_id, start_seconds=2.4, end_seconds=2.9)
+        src_ref2 = SourceReference(media_asset_id=res1.media_asset.media_asset_id, start_seconds=2.4, end_seconds=2.9)
         obs2 = Observation(
             observation_id=f"obs-{uuid.uuid4().hex[:6]}",
             modality="audio",
             observation_type="acoustic_transient",
-            description="High-frequency acoustic transient (880 Hz harmonic spike) matching gate latch tamper sound.",
+            description="[cam-north-04 Audio] High-frequency acoustic transient (880 Hz harmonic spike) matching gate latch tamper sound.",
             source_references=[src_ref2],
             confidence=0.89,
             provenance=prov_aud,
         )
         self.repository.add_observation(obs2)
 
-        src_ref3 = SourceReference(media_asset_id=result.media_asset.media_asset_id, start_seconds=3.2, end_seconds=4.4)
+        src_ref3 = SourceReference(media_asset_id=res1.media_asset.media_asset_id, start_seconds=3.0, end_seconds=4.2)
         obs3 = Observation(
             observation_id=f"obs-{uuid.uuid4().hex[:6]}",
             modality="video",
             observation_type="motion_detected",
-            description="Rapid lateral traversal across marked yellow restricted security zone.",
+            description="[cam-north-04: North Perimeter Sector 4] Rapid lateral traversal across yellow security boundary into connecting courtyard path.",
             source_references=[src_ref3],
-            confidence=0.93,
+            confidence=0.94,
             provenance=prov_vis,
         )
         self.repository.add_observation(obs3)
 
+        # Observations for Feed 2 (Central Courtyard)
+        src_ref4 = SourceReference(media_asset_id=res2.media_asset.media_asset_id, start_seconds=3.6, end_seconds=4.8)
+        obs4 = Observation(
+            observation_id=f"obs-{uuid.uuid4().hex[:6]}",
+            modality="video",
+            observation_type="person_detection",
+            description="[cam-courtyard-02: Central Facility Courtyard] Subject matching tactical profile emerges from North corridor into inner courtyard.",
+            source_references=[src_ref4],
+            confidence=0.95,
+            provenance=prov_vis,
+        )
+        self.repository.add_observation(obs4)
+
+        src_ref5 = SourceReference(media_asset_id=res2.media_asset.media_asset_id, start_seconds=4.6, end_seconds=5.8)
+        obs5 = Observation(
+            observation_id=f"obs-{uuid.uuid4().hex[:6]}",
+            modality="video",
+            observation_type="motion_detected",
+            description="[cam-courtyard-02: Central Facility Courtyard] Subject rapidly advances across courtyard towards building entry door.",
+            source_references=[src_ref5],
+            confidence=0.92,
+            provenance=prov_vis,
+        )
+        self.repository.add_observation(obs5)
+
+        # Events correlated across both feeds
         evt1 = Event(
             event_id=f"evt-{uuid.uuid4().hex[:6]}",
             event_type="restricted_boundary_crossing",
-            description="Subject crosses perimeter yellow line into restricted facility corridor.",
+            description="Subject approaches and crosses North Gate security perimeter line [Camera: cam-north-04].",
             observation_ids=[obs1.observation_id, obs3.observation_id],
             status="confirmed",
             start_seconds=1.2,
             end_seconds=3.5,
             reviewer="Lead Det. Vance",
-            review_notes="Verified against ground boundary coordinates. Movement speed indicates deliberate penetration.",
+            review_notes="Verified against ground coordinates. Deliberate boundary penetration confirmed on Feed 1.",
             reviewed_at=datetime.now(UTC),
         )
         self.repository.add_event(evt1)
@@ -941,35 +1140,79 @@ class InvestigationService:
         evt2 = Event(
             event_id=f"evt-{uuid.uuid4().hex[:6]}",
             event_type="security_hardware_tamper",
-            description="Acoustic signature of manual gate lock vibration and hardware manipulation.",
+            description="Acoustic signature of manual gate lock vibration and hardware manipulation [Camera: cam-north-04].",
             observation_ids=[obs2.observation_id],
             status="proposed",
-            start_seconds=2.3,
-            end_seconds=3.1,
+            start_seconds=2.4,
+            end_seconds=3.0,
         )
         self.repository.add_event(evt2)
 
         evt3 = Event(
             event_id=f"evt-{uuid.uuid4().hex[:6]}",
-            event_type="secondary_zone_incursion",
-            description="Subject sprints toward inner building entrance.",
-            observation_ids=[obs3.observation_id],
-            status="under_review",
-            start_seconds=3.6,
-            end_seconds=4.5,
-            reviewer="Analyst Chen",
-            review_notes="Cross-referencing with building interior door sensor logs.",
+            event_type="cross_camera_premise_transition",
+            description="Suspect transitions from North Gate into Central Facility Courtyard [Correlated across cam-north-04 & cam-courtyard-02].",
+            observation_ids=[obs3.observation_id, obs4.observation_id],
+            status="confirmed",
+            start_seconds=3.2,
+            end_seconds=4.6,
+            reviewer="Lead Det. Vance",
+            review_notes="Cross-camera correlation confirms uninterrupted suspect track moving through North access corridor into courtyard.",
             reviewed_at=datetime.now(UTC),
         )
         self.repository.add_event(evt3)
 
+        evt4 = Event(
+            event_id=f"evt-{uuid.uuid4().hex[:6]}",
+            event_type="facility_courtyard_incursion",
+            description="Unauthorized traversal across Central Facility Courtyard toward secure building entry [Camera: cam-courtyard-02].",
+            observation_ids=[obs4.observation_id, obs5.observation_id],
+            status="confirmed",
+            start_seconds=4.0,
+            end_seconds=5.8,
+            reviewer="Analyst Chen",
+            review_notes="Movement trajectory points directly to secure inner facility door.",
+            reviewed_at=datetime.now(UTC),
+        )
+        self.repository.add_event(evt4)
+
+        # Cross-camera chronological event links
+        link1 = EventLink(
+            event_link_id=f"link-{uuid.uuid4().hex[:6]}",
+            from_event_id=evt1.event_id,
+            to_event_id=evt2.event_id,
+            relationship_type="overlaps",
+            rationale="Acoustic hardware tamper coincides with physical approach to gate boundary.",
+            confidence=0.91,
+        )
+        link2 = EventLink(
+            event_link_id=f"link-{uuid.uuid4().hex[:6]}",
+            from_event_id=evt1.event_id,
+            to_event_id=evt3.event_id,
+            relationship_type="before",
+            rationale="Suspect breaches North Gate before transitioning into courtyard corridor.",
+            confidence=0.95,
+        )
+        link3 = EventLink(
+            event_link_id=f"link-{uuid.uuid4().hex[:6]}",
+            from_event_id=evt3.event_id,
+            to_event_id=evt4.event_id,
+            relationship_type="before",
+            rationale="Corridor transition leads directly into courtyard advance.",
+            confidence=0.96,
+        )
+        self.repository.add_event_link(link1)
+        self.repository.add_event_link(link2)
+        self.repository.add_event_link(link3)
+
+        # Evidence assessments
         as1 = EvidenceAssessment(
             assessment_id=f"assess-{uuid.uuid4().hex[:6]}",
             target_type="event",
             target_id=evt1.event_id,
             assessment_type="evidence_quality",
             rating="high",
-            rationale="Clear multi-frame visual detection with high confidence (0.96) and uninterrupted track.",
+            rationale="Clear multi-frame visual detection with high confidence (0.96) and uninterrupted track on cam-north-04.",
             assessed_by="Automated Verification Agent",
         )
         as2 = EvidenceAssessment(
@@ -978,39 +1221,75 @@ class InvestigationService:
             target_id=evt2.event_id,
             assessment_type="uncertainty",
             rating="moderate",
-            rationale="Acoustic harmonic matches latch strike; however, physical contact is partially occluded.",
+            rationale="Acoustic harmonic matches latch strike; physical contact occurs near gate boundary.",
             assessed_by="Temporal Correlator Agent",
         )
         as3 = EvidenceAssessment(
             assessment_id=f"assess-{uuid.uuid4().hex[:6]}",
-            target_type="observation",
-            target_id=obs2.observation_id,
+            target_type="event",
+            target_id=evt3.event_id,
             assessment_type="support_level",
             rating="high",
-            rationale="Clean spectral peak at 880Hz with 18dB SNR over background rumble.",
-            assessed_by="Acoustic Signal Assessor",
+            rationale="Cross-camera correlation established between cam-north-04 and cam-courtyard-02 with matching clothing and temporal continuity.",
+            assessed_by="Temporal Correlation Agent",
         )
         self.repository.add_evidence_assessment(as1)
         self.repository.add_evidence_assessment(as2)
         self.repository.add_evidence_assessment(as3)
 
+        # Coverage records for both camera feeds
+        now = datetime.now(UTC)
+        cov1 = CoverageRecord(
+            coverage_id=f"cov-{uuid.uuid4().hex[:6]}",
+            investigation_id=inv.investigation_id,
+            source_reference_id=res1.media_asset.media_asset_id,
+            status="examined",
+            examined_at=now,
+            notes="Complete timeline examination performed for North Perimeter Gate (cam-north-04).",
+            artifact_ids=[a.artifact_id for a in res1.frame_artifacts + res1.audio_artifacts],
+        )
+        cov2 = CoverageRecord(
+            coverage_id=f"cov-{uuid.uuid4().hex[:6]}",
+            investigation_id=inv.investigation_id,
+            source_reference_id=res2.media_asset.media_asset_id,
+            status="examined",
+            examined_at=now,
+            notes="Complete timeline examination performed for Central Facility Courtyard (cam-courtyard-02).",
+            artifact_ids=[a.artifact_id for a in res2.frame_artifacts + res2.audio_artifacts],
+        )
+        self.repository.add_coverage_record(cov1)
+        self.repository.add_coverage_record(cov2)
+
+        # Slice clips
         try:
             self.slice_incident_clip(inv.investigation_id, evt1.event_id, padding_seconds=0.5)
+            self.slice_incident_clip(inv.investigation_id, evt4.event_id, padding_seconds=0.5)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"Could not auto-slice demo clip: {exc}")
+            logger.warning(f"Could not auto-slice demo clips: {exc}")
+
+        all_obs = [obs1, obs2, obs3, obs4, obs5]
+        all_evts = [evt1, evt2, evt3, evt4]
 
         rep = Report(
             report_id=f"rep-{uuid.uuid4().hex[:6]}",
             investigation_id=inv.investigation_id,
-            title="Preliminary Forensic Report: North Perimeter Gate Breach",
+            title="Forensic Investigation Report: Multi-Camera Facility Intrusion Analysis",
             summary=(
-                "Autonomous multi-modal forensic analysis confirms an unauthorized restricted boundary breach "
-                "at 00:01.20 - 00:03.50 into Sector 4 corridor. Acoustic telemetry detected simultaneous gate hardware "
-                "manipulation at 00:02.40. One incident sub-clip has been isolated and cryptographically indexed."
+                "Autonomous multi-camera forensic investigation confirms a coordinated premise breach across two synchronized feeds:\n\n"
+                "### 1. Objective Finding & Direct Answer\n"
+                "A single unauthorized intruder breached the North Gate at 00:01.20 (cam-north-04) and successfully traversed through the access corridor into the Central Facility Courtyard at 00:03.60 (cam-courtyard-02), advancing toward the building entrance by 00:05.80.\n\n"
+                "### 2. Chronological Timeline Analysis (Cross-Camera Premise Correlation)\n"
+                "- [00:01.20 - 00:03.50] Event: restricted_boundary_crossing (cam-north-04) — Suspect approaches and breaches yellow perimeter line.\n"
+                "- [00:02.40 - 00:03.00] Event: security_hardware_tamper (cam-north-04) — Acoustic transient matches lock latch vibration.\n"
+                "- [00:03.20 - 00:04.60] Event: cross_camera_premise_transition (cam-north-04 & cam-courtyard-02) — Cross-camera trajectory confirms suspect movement between feeds.\n"
+                "- [00:04.00 - 00:05.80] Event: facility_courtyard_incursion (cam-courtyard-02) — Suspect advances across courtyard toward facility entrance.\n\n"
+                "### 3. Evidence Integrity & Confidence\n"
+                "Findings are corroborated across two independent camera views with continuous temporal alignment and high confidence (0.94-0.96)."
             ),
-            observation_ids=[obs1.observation_id, obs2.observation_id, obs3.observation_id],
-            event_ids=[evt1.event_id, evt2.event_id, evt3.event_id],
+            observation_ids=[o.observation_id for o in all_obs],
+            event_ids=[e.event_id for e in all_evts],
             assessment_ids=[as1.assessment_id, as2.assessment_id, as3.assessment_id],
+            coverage_ids=[cov1.coverage_id, cov2.coverage_id],
             generated_by="Agentic Reporter & Synthesizer",
             version=1,
             status="draft",
@@ -1021,9 +1300,9 @@ class InvestigationService:
             investigation_id=inv.investigation_id,
             status=InvestigationStatus.COMPLETED,
             completed_at=datetime.now(UTC),
-            task_ids=["task-ingest", "task-visual", "task-audio", "task-temporal", "task-verify", "task-report"],
-            observation_ids=[obs1.observation_id, obs2.observation_id, obs3.observation_id],
-            event_ids=[evt1.event_id, evt2.event_id, evt3.event_id],
+            task_ids=["task-ingest-1", "task-ingest-2", "task-visual", "task-audio", "task-temporal", "task-verify", "task-report"],
+            observation_ids=[o.observation_id for o in all_obs],
+            event_ids=[e.event_id for e in all_evts],
         )
         self.repository.save_state(st)
 
@@ -1034,8 +1313,8 @@ class InvestigationService:
             actor="Lead Det. Vance",
             target_type="investigation",
             target_id=inv.investigation_id,
-            notes="Demo case initialized with multi-modal forensic pipeline.",
+            notes="Multi-camera premise demo case initialized with cross-camera correlation.",
         )
         self.repository.add_audit_log(audit)
 
-        return inv, result
+        return inv, primary_result

@@ -30,6 +30,26 @@ configure_logging()
 
 logger = logging.getLogger(__name__)
 
+# Suppress the spurious [WinError 10054] connection-reset tracebacks emitted by
+# asyncio's Proactor transport on Windows when a browser audio/video player closes
+# its TCP connection immediately after receiving a 206 Partial Content response.
+# This is perfectly normal HTTP range-request behaviour; the error is not actionable
+# and only produces log noise.
+logging.getLogger("asyncio").addFilter(
+    type(
+        "_IgnoreConnectionReset",
+        (logging.Filter,),
+        {
+            "filter": staticmethod(
+                lambda record: not (
+                    record.exc_info
+                    and isinstance(record.exc_info[1], ConnectionResetError)
+                )
+            )
+        },
+    )()
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -113,7 +133,10 @@ def create_app() -> FastAPI:
         def serve_dashboard() -> FileResponse:
             """Serve interactive VIGIL forensic frontend dashboard."""
             index_file = ui_dir / "index.html"
-            return FileResponse(index_file)
+            return FileResponse(
+                index_file,
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"},
+            )
 
     # Include routers
     app.include_router(investigations_router)

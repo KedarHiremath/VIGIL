@@ -191,3 +191,60 @@ def test_dashboard_endpoints(test_setup) -> None:
     r2 = client.get("/dashboard")
     assert r2.status_code == 200
     assert "VIGIL" in r2.text
+
+
+def test_post_investigations_multi_file_sequential_upload(test_setup) -> None:
+    client, _service, tmp_path = test_setup
+    feed1_path = tmp_path / "premise_feed_1.mp4"
+    feed2_path = tmp_path / "premise_feed_2.mp4"
+    create_test_video(feed1_path, duration_seconds=1.0, fps=24, with_audio=False)
+    create_test_video(feed2_path, duration_seconds=1.0, fps=24, with_audio=False)
+
+    with open(feed1_path, "rb") as f1, open(feed2_path, "rb") as f2:
+        res = client.post(
+            "/api/v1/investigations",
+            files=[
+                ("files", ("premise_feed_1.mp4", f1, "video/mp4")),
+                ("files", ("premise_feed_2.mp4", f2, "video/mp4")),
+            ],
+            data={
+                "title": "Dual-Camera Premise Correlation",
+                "objective": "Track subject trajectory across cameras",
+                "camera_ids": "cam-gate-01, cam-lobby-02",
+                "sample_interval_seconds": "0.5",
+                "max_frames": "4",
+                "run_async": "false",
+            },
+        )
+
+    assert res.status_code == 202
+    data = res.json()
+    assert data["media_count"] == 2
+    assert "cam-gate-01" in data["camera_ids"]
+    assert "cam-lobby-02" in data["camera_ids"]
+    inv_id = data["investigation_id"]
+
+    # Check media list endpoint returns both assets
+    media_res = client.get(f"/api/v1/investigations/{inv_id}/media")
+    assert media_res.status_code == 200
+    media_items = media_res.json()
+    assert len(media_items) == 2
+    cams = {m["camera_id"] for m in media_items}
+    assert cams == {"cam-gate-01", "cam-lobby-02"}
+
+    # Add a third feed via POST /api/v1/investigations/{inv_id}/media
+    feed3_path = tmp_path / "premise_feed_3.mp4"
+    create_test_video(feed3_path, duration_seconds=1.0, fps=24, with_audio=False)
+    with open(feed3_path, "rb") as f3:
+        add_res = client.post(
+            f"/api/v1/investigations/{inv_id}/media",
+            files={"file": ("premise_feed_3.mp4", f3, "video/mp4")},
+            data={"camera_id": "cam-vault-03"},
+        )
+    assert add_res.status_code == 201
+    add_data = add_res.json()
+    assert add_data["camera_id"] == "cam-vault-03"
+
+    # Now media list has 3 assets
+    media_res_3 = client.get(f"/api/v1/investigations/{inv_id}/media")
+    assert len(media_res_3.json()) == 3

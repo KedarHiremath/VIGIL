@@ -61,12 +61,34 @@ class VisualDetectorWorker(BaseToolWorker):
                 raise ValueError("No image artifacts found for visual detection.")
             artifact_ids = [a.artifact_id for a in image_artifacts]
 
-        # Analyze frames up to max_frames_per_task
+        # Balance sampling across multiple media assets / cameras
+        media_groups: dict[str, list[str]] = {}
+        for aid in artifact_ids:
+            try:
+                art = self.repository.get_artifact(aid)
+                mid = (
+                    art.source_reference.media_asset_id
+                    if art.source_reference
+                    else "default"
+                )
+                media_groups.setdefault(mid, []).append(aid)
+            except Exception:
+                media_groups.setdefault("default", []).append(aid)
+
         max_frames_per_task = int(request.parameters.get("max_frames_per_task", 8))
-        artifact_ids = artifact_ids[:max_frames_per_task]
+        if len(media_groups) > 1:
+            per_media_limit = max(2, max_frames_per_task // len(media_groups))
+            balanced_ids: list[str] = []
+            for m_aids in media_groups.values():
+                balanced_ids.extend(m_aids[:per_media_limit])
+            artifact_ids = balanced_ids
+        else:
+            artifact_ids = artifact_ids[:max_frames_per_task]
+
         logger.info(
-            "VisualDetectorWorker: analyzing %d frame(s) for task %s",
+            "VisualDetectorWorker: analyzing %d frame(s) across %d media feed(s) for task %s",
             len(artifact_ids),
+            len(media_groups),
             request.task_id,
         )
 
@@ -80,16 +102,35 @@ class VisualDetectorWorker(BaseToolWorker):
             except Exception:
                 pass
 
+        # Lookup tables for camera and media metadata
+        media_map = {m.media_asset_id: m for m in self.repository.list_media_assets()}
+        camera_map = {c.camera_id: c for c in self.repository.list_cameras()}
+
         output_observation_ids: list[str] = []
 
         for art_id in artifact_ids:
             artifact = self.repository.get_artifact(art_id)
 
+            # Camera context for this frame
+            cam_label = ""
+            if (
+                artifact.source_reference
+                and artifact.source_reference.media_asset_id in media_map
+            ):
+                asset = media_map[artifact.source_reference.media_asset_id]
+                if asset.camera_id and asset.camera_id in camera_map:
+                    cam = camera_map[asset.camera_id]
+                    cam_label = (
+                        f"[{cam.camera_id}: {cam.location_label or cam.name}]"
+                    )
+                elif asset.camera_id:
+                    cam_label = f"[{asset.camera_id}]"
+
             # ------------------------------------------------------------------
             # Validate the artifact storage URI before dispatching to the VLM.
             # Synthetic / mock URIs (e.g. file:///storage/artifacts/…) that do
             # not resolve to a real file on disk cannot be base64-encoded and
-            # would cause the API call to fail.  Skip them with a fallback
+            # would cause the API call to fail. Skip them with a fallback
             # observation so the rest of the queue is unaffected.
             # ------------------------------------------------------------------
             uri = artifact.storage_uri
@@ -97,8 +138,8 @@ class VisualDetectorWorker(BaseToolWorker):
             if uri.startswith("http://") or uri.startswith("https://"):
                 _is_resolvable = True
             else:
-                from urllib.parse import unquote, urlparse as _urlparse
                 from pathlib import Path as _Path
+                from urllib.parse import unquote, urlparse as _urlparse
                 try:
                     if uri.startswith("file://"):
                         _parsed = _urlparse(uri)
@@ -120,8 +161,9 @@ class VisualDetectorWorker(BaseToolWorker):
                 )
                 raw_content = ""
             else:
+                cam_feed_str = f"Camera feed: {cam_label}. " if cam_label else ""
                 prompt = (
-                    f"Forensic visual analysis. {obj_context}"
+                    f"Forensic visual analysis. {cam_feed_str}{obj_context}"
                     "Identify all persons, vehicles, objects, and activities visible in this frame. "
                     "Output JSON with a list of 'observations', each having: "
                     "'observation_type', 'description', 'confidence', and optional 'entity' with "
@@ -177,7 +219,13 @@ class VisualDetectorWorker(BaseToolWorker):
             for obs_item in observations_data:
                 obs_id = f"obs-vis-{uuid.uuid4().hex[:8]}"
                 obs_type = str(obs_item.get("observation_type", "visual_detection"))
-                desc = clean_vlm_text(str(obs_item.get("description", "Salient visual detection.")))
+                raw_desc = clean_vlm_text(str(obs_item.get("description", "Salient visual detection.")))
+                # Prepend camera context if not already present
+                if cam_label and cam_label not in raw_desc:
+                    desc = f"{cam_label} {raw_desc}"
+                else:
+                    desc = raw_desc
+
                 confidence = float(obs_item.get("confidence", 0.90))
                 confidence = min(max(confidence, 0.0), 1.0)
 

@@ -19,16 +19,36 @@ class InvestigationCreateResponse(BaseModel):
     title: str = Field(description="Investigation title")
     status: str = Field(description="Current status (e.g. 'created', 'running')")
     media_asset_id: str = Field(description="Primary ingested media asset ID")
+    media_asset_ids: list[str] = Field(
+        default_factory=list, description="All ingested media asset IDs"
+    )
     camera_id: str | None = Field(
-        default=None, description="Registered camera ID if any"
+        default=None, description="Registered primary camera ID if any"
+    )
+    camera_ids: list[str] = Field(
+        default_factory=list, description="All registered camera IDs"
+    )
+    media_count: int = Field(
+        default=1, description="Total number of media feeds ingested"
     )
     frame_count: int = Field(
-        default=0, description="Number of sample frames extracted"
+        default=0, description="Number of sample frames extracted across feeds"
     )
     has_audio: bool = Field(
         default=False, description="Whether an audio stream was extracted"
     )
     message: str = Field(description="Informational status message")
+
+
+class MediaIngestResponse(BaseModel):
+    """Response returned when additional footage is ingested into an investigation."""
+
+    investigation_id: str
+    media_asset_id: str
+    camera_id: str | None = None
+    frame_count: int = 0
+    has_audio: bool = False
+    message: str = "Media successfully ingested and linked to investigation."
 
 
 class InvestigationStatusResponse(BaseModel):

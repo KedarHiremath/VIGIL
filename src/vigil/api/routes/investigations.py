@@ -30,6 +30,7 @@ from vigil.api.schemas import (
     InvestigationCreateResponse,
     InvestigationStatusResponse,
     InvestigationSummaryResponse,
+    MediaIngestResponse,
     ReportFinalizeRequest,
     ReportFinalizeResponse,
 )
@@ -53,17 +54,27 @@ router = APIRouter(prefix="/api/v1/investigations", tags=["investigations"])
     "",
     response_model=InvestigationCreateResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Upload video footage and initiate an investigation",
+    summary="Upload video footage (single or multiple feeds) and initiate an investigation",
 )
 def create_investigation(
     file: Annotated[
         UploadFile | None,
-        File(description="Video footage file (.mp4, .mkv, .avi, etc.)"),
+        File(description="Single video footage file (.mp4, .mkv, .avi, etc.)"),
+    ] = None,
+    files: Annotated[
+        list[UploadFile] | None,
+        File(description="Multiple video footage files for multi-camera premise correlation"),
     ] = None,
     file_path: Annotated[
         str | None,
         Form(
             description="Path to an existing video file on the server if not uploading directly"
+        ),
+    ] = None,
+    file_paths: Annotated[
+        list[str] | str | None,
+        Form(
+            description="Paths to existing video files on the server (comma-separated or list)"
         ),
     ] = None,
     title: Annotated[
@@ -81,6 +92,10 @@ def create_investigation(
     camera_id: Annotated[
         str | None,
         Form(description="Unique camera ID (e.g. cam-north-01)"),
+    ] = None,
+    camera_ids: Annotated[
+        str | None,
+        Form(description="Comma-separated camera IDs for multiple feeds (e.g. cam-01,cam-02)"),
     ] = None,
     camera_name: Annotated[
         str | None,
@@ -102,7 +117,7 @@ def create_investigation(
     ] = 2.0,
     max_frames: Annotated[
         int,
-        Form(description="Maximum number of sample frames to extract"),
+        Form(description="Maximum number of sample frames to extract per feed"),
     ] = 50,
     extract_audio: Annotated[
         bool,
@@ -123,44 +138,70 @@ def create_investigation(
         Depends(get_investigation_service),
     ] = None,  # type: ignore[assignment]
 ) -> InvestigationCreateResponse:
-    """Upload video footage, perform physical media ingestion and frame/audio extraction,
+    """Upload video footage (single or multiple feeds), perform physical media ingestion and frame/audio extraction,
 
     and initiate an autonomous agentic forensic investigation.
     """
-    target_path: Path
+    target_paths: list[Path] = []
+    upload_dir = service.storage_dir / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
 
-    if file is not None and file.filename:
-        upload_dir = service.storage_dir / "uploads"
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        unique_name = f"{uuid.uuid4().hex[:8]}_{file.filename}"
-        target_path = upload_dir / unique_name
+    # 1. Collect uploaded files sequentially
+    all_uploads: list[UploadFile] = []
+    if files:
+        all_uploads.extend([f for f in files if f.filename])
+    if file and file.filename:
+        if not any(f.filename == file.filename for f in all_uploads):
+            all_uploads.append(file)
 
+    for up_file in all_uploads:
+        unique_name = f"{uuid.uuid4().hex[:8]}_{up_file.filename}"
+        t_path = upload_dir / unique_name
         try:
-            with open(target_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
+            with open(t_path, "wb") as buffer:
+                shutil.copyfileobj(up_file.file, buffer)
+            target_paths.append(t_path)
         finally:
-            file.file.close()
+            up_file.file.close()
 
-    elif file_path:
-        target_path = Path(file_path).resolve()
-        if not target_path.is_file():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Specified file_path does not exist: {file_path}",
-            )
-    else:
+    # 2. Collect existing server file paths
+    if not target_paths:
+        raw_paths: list[str] = []
+        if isinstance(file_paths, list):
+            raw_paths.extend(file_paths)
+        elif isinstance(file_paths, str) and file_paths.strip():
+            raw_paths.extend([p.strip() for p in file_paths.split(",") if p.strip()])
+        if file_path and file_path.strip() and file_path not in raw_paths:
+            raw_paths.append(file_path.strip())
+
+        for p_str in raw_paths:
+            p = Path(p_str).resolve()
+            if not p.is_file():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Specified file_path does not exist: {p_str}",
+                )
+            target_paths.append(p)
+
+    if not target_paths:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Either a video file upload or a valid file_path is required.",
         )
 
+    # Parse camera IDs if provided as comma-separated
+    parsed_camera_ids: list[str] | None = None
+    if camera_ids and camera_ids.strip():
+        parsed_camera_ids = [c.strip() for c in camera_ids.split(",") if c.strip()]
+
     try:
         inv, result = service.create_and_ingest_investigation(
-            file_path=target_path,
+            file_paths=target_paths,
             title=title,
             objective=objective,
             scope_description=scope_description,
             camera_id=camera_id,
+            camera_ids=parsed_camera_ids,
             camera_name=camera_name,
             camera_location=camera_location,
             camera_timezone=camera_timezone,
@@ -180,19 +221,136 @@ def create_investigation(
 
     curr_status = service.get_status(inv.investigation_id)
 
+    total_frames = sum(len(r.frame_artifacts) for r in result.all_ingestion_results)
+    any_audio = any(len(r.audio_artifacts) > 0 for r in result.all_ingestion_results)
+    all_cam_ids = [r.camera.camera_id for r in result.all_ingestion_results if r.camera]
+
     return InvestigationCreateResponse(
         investigation_id=inv.investigation_id,
         title=inv.title,
         status=curr_status.status.value,
         media_asset_id=result.media_asset.media_asset_id,
+        media_asset_ids=inv.media_asset_ids,
         camera_id=result.camera.camera_id if result.camera else None,
-        frame_count=len(result.frame_artifacts),
-        has_audio=len(result.audio_artifacts) > 0,
+        camera_ids=all_cam_ids,
+        media_count=len(inv.media_asset_ids),
+        frame_count=total_frames,
+        has_audio=any_audio,
         message=(
             "Investigation initiated and running in background."
             if run_async
             else "Investigation completed."
         ),
+    )
+
+
+@router.post(
+    "/{investigation_id}/media",
+    response_model=MediaIngestResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add and ingest additional surveillance video footage into an existing investigation",
+)
+def add_investigation_media(
+    investigation_id: str,
+    file: Annotated[
+        UploadFile | None,
+        File(description="Video footage file (.mp4, .mkv, .avi, etc.)"),
+    ] = None,
+    file_path: Annotated[
+        str | None,
+        Form(description="Path to an existing video file on the server"),
+    ] = None,
+    camera_id: Annotated[
+        str | None,
+        Form(description="Camera ID for this feed (e.g. cam-courtyard-02)"),
+    ] = None,
+    camera_name: Annotated[
+        str | None,
+        Form(description="Human readable camera name"),
+    ] = None,
+    camera_location: Annotated[
+        str | None,
+        Form(description="Camera location label"),
+    ] = None,
+    camera_timezone: Annotated[
+        str | None,
+        Form(description="Camera timezone (e.g. UTC)"),
+    ] = None,
+    sample_interval_seconds: Annotated[
+        float,
+        Form(description="Interval in seconds between sample frames"),
+    ] = 2.0,
+    max_frames: Annotated[
+        int,
+        Form(description="Maximum sample frames to extract"),
+    ] = 50,
+    extract_audio: Annotated[
+        bool,
+        Form(description="Whether to demux audio track"),
+    ] = True,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> MediaIngestResponse:
+    """Add another camera feed / video file to an existing investigation."""
+    try:
+        service.get_investigation(investigation_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Investigation '{investigation_id}' not found.",
+        ) from exc
+
+    target_path: Path
+    if file is not None and file.filename:
+        upload_dir = service.storage_dir / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        unique_name = f"{uuid.uuid4().hex[:8]}_{file.filename}"
+        target_path = upload_dir / unique_name
+        try:
+            with open(target_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+        finally:
+            file.file.close()
+    elif file_path:
+        target_path = Path(file_path).resolve()
+        if not target_path.is_file():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Specified file_path does not exist: {file_path}",
+            )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either a video file upload or a valid file_path is required.",
+        )
+
+    try:
+        result = service.add_and_ingest_media(
+            investigation_id=investigation_id,
+            file_path=target_path,
+            camera_id=camera_id,
+            camera_name=camera_name,
+            camera_location=camera_location,
+            camera_timezone=camera_timezone,
+            sample_interval_seconds=sample_interval_seconds,
+            max_frames=max_frames,
+            extract_audio=extract_audio,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Media ingestion failed: {exc}",
+        ) from exc
+
+    return MediaIngestResponse(
+        investigation_id=investigation_id,
+        media_asset_id=result.media_asset.media_asset_id,
+        camera_id=result.camera.camera_id if result.camera else None,
+        frame_count=len(result.frame_artifacts),
+        has_audio=len(result.audio_artifacts) > 0,
+        message=f"Surveillance feed successfully added and ingested as '{result.media_asset.media_asset_id}'.",
     )
 
 
@@ -784,15 +942,23 @@ def get_artifact_content(
         )
 
     media_type = "video/mp4" if artifact.media_type == "video" else ("audio/wav" if artifact.media_type == "audio" else "image/jpeg")
-    return FileResponse(path=local_path, media_type=media_type, filename=local_path.name)
-
+    # Use content_disposition_type="inline" so browsers stream/play the file
+    # instead of downloading it. Passing filename= with the default "attachment"
+    # disposition causes browsers to abort the TCP connection after receiving a
+    # 206 Partial Content response, producing [WinError 10054] noise in the logs.
+    return FileResponse(
+        path=local_path,
+        media_type=media_type,
+        filename=local_path.name,
+        content_disposition_type="inline",
+    )
 
 
 @router.post(
     "/demo",
     response_model=InvestigationCreateResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Seed and initialize a rich demo forensic investigation",
+    summary="Seed and initialize a rich multi-camera demo forensic investigation",
 )
 def create_demo_investigation(
     service: Annotated[
@@ -806,15 +972,21 @@ def create_demo_investigation(
     """
     try:
         inv, result = service.create_demo_investigation()
+        total_frames = sum(len(r.frame_artifacts) for r in result.all_ingestion_results)
+        any_audio = any(len(r.audio_artifacts) > 0 for r in result.all_ingestion_results)
+        all_cam_ids = [r.camera.camera_id for r in result.all_ingestion_results if r.camera]
         return InvestigationCreateResponse(
             investigation_id=inv.investigation_id,
             title=inv.title,
             status="completed",
             media_asset_id=result.media_asset.media_asset_id,
-            camera_id="cam-north-04",
-            frame_count=len(result.frame_artifacts),
-            has_audio=True,
-            message="Demo forensic investigation seeded successfully.",
+            media_asset_ids=inv.media_asset_ids,
+            camera_id=result.camera.camera_id if result.camera else None,
+            camera_ids=all_cam_ids,
+            media_count=len(inv.media_asset_ids),
+            frame_count=total_frames,
+            has_audio=any_audio,
+            message="Multi-camera demo forensic investigation seeded successfully.",
         )
     except Exception as exc:
         raise HTTPException(
@@ -905,7 +1077,16 @@ def get_media_asset_content(
         )
 
     media_type = "video/mp4" if asset.media_type == "video" else ("audio/wav" if asset.media_type == "audio" else "image/jpeg")
-    return FileResponse(path=local_path, media_type=media_type, filename=local_path.name)
+    # Use content_disposition_type="inline" so browsers stream/play the file
+    # instead of downloading it. Passing filename= with the default "attachment"
+    # disposition causes browsers to abort the TCP connection after receiving a
+    # 206 Partial Content response, producing [WinError 10054] noise in the logs.
+    return FileResponse(
+        path=local_path,
+        media_type=media_type,
+        filename=local_path.name,
+        content_disposition_type="inline",
+    )
 
 
 @router.get(

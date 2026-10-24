@@ -41,14 +41,16 @@ class InvestigationPlanner:
         """Construct the initial multi-phase forensic investigation plan."""
         inv_id = investigation.investigation_id
         media_refs = list(investigation.media_asset_ids)
+        media_count = len(media_refs)
 
         tasks: list[PlannedTask] = []
 
         # Phase 1: Frame Extraction / Interval Sampling
+        feed_note = f" across {media_count} surveillance camera feeds" if media_count > 1 else " across timeline"
         tasks.append(
             PlannedTask(
                 task_type="frame_sampling",
-                description="Extract forensic sample frames from media assets across timeline",
+                description=f"Extract forensic sample frames from media assets{feed_note}",
                 input_refs=media_refs,
                 parameters={
                     "investigation_id": inv_id,
@@ -62,11 +64,12 @@ class InvestigationPlanner:
         tasks.append(
             PlannedTask(
                 task_type="visual_analysis",
-                description="Analyze extracted frame artifacts for persons, vehicles, objects, and anomalies",
+                description=f"Analyze extracted frame artifacts across premise feeds for persons, vehicles, objects, and anomalies",
                 input_refs=[],  # Dynamically resolved by worker or updated by agent
                 parameters={
                     "investigation_id": inv_id,
                     "detect_entities": True,
+                    "max_frames_per_task": max(8, media_count * 4),
                 },
             )
         )
@@ -75,7 +78,7 @@ class InvestigationPlanner:
         tasks.append(
             PlannedTask(
                 task_type="audio_transcription",
-                description="Transcribe audio tracks and detect acoustic trigger events",
+                description=f"Transcribe audio tracks and detect acoustic trigger events across feeds",
                 input_refs=media_refs,
                 parameters={
                     "investigation_id": inv_id,
@@ -87,7 +90,7 @@ class InvestigationPlanner:
         tasks.append(
             PlannedTask(
                 task_type="event_correlation",
-                description="Correlate observations chronologically into Events and EventLinks",
+                description="Correlate observations across premise camera feeds into Events and EventLinks",
                 input_refs=[],
                 parameters={
                     "investigation_id": inv_id,
@@ -112,7 +115,7 @@ class InvestigationPlanner:
         tasks.append(
             PlannedTask(
                 task_type="coverage_evaluation",
-                description="Evaluate and record source examination coverage across the investigation timeline",
+                description=f"Evaluate and record source examination coverage across all {media_count} premise feeds",
                 input_refs=media_refs,
                 parameters={
                     "investigation_id": inv_id,

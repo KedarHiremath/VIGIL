@@ -62,6 +62,7 @@ class FrameExtractorWorker(BaseToolWorker):
 
             # Check if physical video file exists
             physical_file = uri_to_file_path(media_asset.storage_uri)
+            asset_extracted = False
 
             if physical_file is not None and physical_file.is_file():
                 # Extract real frames using MediaDecoder
@@ -97,8 +98,11 @@ class FrameExtractorWorker(BaseToolWorker):
                     self.repository.add_artifact(artifact)
                     output_artifact_ids.append(art_id)
 
-                if output_artifact_ids:
-                    continue
+                if extracted_frames:
+                    asset_extracted = True
+
+            if asset_extracted:
+                continue
 
             # Fallback to synthetic artifact creation for mock URIs
             current_t = start_t

@@ -128,6 +128,13 @@
         <div class="panel-title">
           <span class="panel-icon">&#x1F3AC;</span> FOOTAGE &amp; INCIDENT CLIPS
         </div>
+        <div class="camera-feed-picker" id="cameraFeedPickerWrap">
+          <label for="cameraFeedSelect" class="cam-feed-label">&#x1F4F9; FEED:</label>
+          <select id="cameraFeedSelect" class="camera-feed-select" title="Switch surveillance camera feed">
+            <option value="primary">Primary Camera</option>
+          </select>
+          <button type="button" id="openAddFeedModalBtn" class="btn-add-feed" title="Add another camera feed to this active case">+ Feed</button>
+        </div>
         <div class="media-tabs" id="mediaTabs">
           <button class="tab-btn active" data-tab="primary">Primary Footage</button>
           <button class="tab-btn" data-tab="clips">Incident Sub-clips (<span id="clipsCount">0</span>)</button>
@@ -135,7 +142,7 @@
       </div>
 
       <div class="video-container" id="videoContainer">
-        <video id="mainVideoPlayer" preload="metadata" playsinline>
+        <video id="mainVideoPlayer" preload="auto" playsinline>
           <p>Select video footage to review.</p>
         </video>
         <div id="videoOverlayHud" class="video-hud-overlay">
@@ -261,13 +268,14 @@
             <strong>Raw Objective Model Detections Across Footage Timestamps</strong>
           </div>
           <p class="drawer-info-text">
-            Observations record discrete physical findings detected by Vision (VLM) and Audio DSP analysis (e.g. person movement, vehicles, acoustic transients). Each observation is linked to a precise video timecode. Click any row to jump the player directly to that moment in the footage.
+            Observations record discrete physical findings detected by Vision (VLM) and Audio DSP analysis (e.g. person movement, vehicles, acoustic transients). Each observation is linked to a precise video timecode. Click any row to jump the player directly to that camera feed and moment in the footage.
           </p>
         </div>
         <table class="forensic-table" id="observationsTable">
           <thead>
             <tr>
               <th>ID</th>
+              <th>Camera</th>
               <th>Modality</th>
               <th>Finding Type</th>
               <th>Timecode Interval</th>
@@ -277,7 +285,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr><td colspan="7" style="text-align:center;">No observations recorded.</td></tr>
+            <tr><td colspan="8" style="text-align:center;">No observations recorded.</td></tr>
           </tbody>
         </table>
       </div>
@@ -340,34 +348,61 @@
 
   <!-- Modal 1: Ingest Footage / New Investigation -->
   <div id="newInvModal" class="modal-backdrop hidden">
-    <div class="modal">
+    <div class="modal modal-lg">
       <div class="modal-header">
-        <h3>&#x1F4E5; Ingest Video Footage &amp; Start Investigation</h3>
+        <div>
+          <h3>&#x1F4E5; Ingest Video Footage &amp; Start Investigation</h3>
+          <p class="modal-subtitle">Select multiple surveillance feeds in one go &bull; Sequential ingestion &amp; unified event correlation</p>
+        </div>
         <button class="modal-close" id="closeNewInvModal">&times;</button>
       </div>
       <form id="newInvForm" class="modal-body">
+        <!-- Hidden file input for multi-file selection -->
+        <input type="file" id="videoFileInput" accept="video/*,.mp4,.mkv,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts" class="file-input-hidden" multiple>
+
         <div class="drop-zone" id="dropZone">
           <div class="drop-icon">&#x1F4F9;</div>
-          <div class="drop-text">Drag &amp; drop video footage file (.mp4, .mkv, .avi)</div>
-          <div class="drop-sub">or click to browse local files</div>
-          <input type="file" id="videoFileInput" accept="video/*" class="file-input-hidden">
-          <div id="selectedFileLabel" class="selected-file-label hidden"></div>
+          <div class="drop-text">Drag &amp; drop video footage files (.mp4, .mkv, .avi, .mov)</div>
+          <div class="drop-sub">Select multiple camera feeds simultaneously or add feeds from different folders</div>
+          <div class="drop-actions">
+            <button type="button" class="btn btn-secondary" id="browseVideosBtn">
+              &#x1F4C2; Select Video Files (Multiple)
+            </button>
+            <button type="button" class="btn btn-outline hidden" id="addMoreVideosBtn">
+              + Add More Videos
+            </button>
+            <button type="button" class="btn btn-ghost-danger hidden" id="clearAllVideosBtn">
+              &#x1F5D1; Clear All
+            </button>
+          </div>
+          <div class="drop-hint">&#x2139;&#xFE0F; Hold <kbd>Ctrl</kbd> or <kbd>Shift</kbd> in file dialog to select multiple video files at once</div>
+        </div>
+
+        <!-- Selected Feeds Ingestion Queue -->
+        <div id="selectedFeedsQueue" class="selected-feeds-queue hidden">
+          <div class="queue-header">
+            <span class="queue-title">&#x1F3AC; Premise Surveillance Feeds (<span id="selectedFeedCount">0</span> selected)</span>
+            <span class="queue-note">Feeds will be ingested sequentially &amp; cross-correlated under 1 report</span>
+          </div>
+          <div id="selectedFeedsList" class="selected-feeds-list">
+            <!-- Dynamically populated rows -->
+          </div>
         </div>
 
         <div class="form-grid">
           <div class="form-group">
             <label for="invTitleInput">Case / Investigation Title</label>
-            <input type="text" id="invTitleInput" placeholder="e.g. Breach Analysis: South Perimeter Gate">
+            <input type="text" id="invTitleInput" placeholder="e.g. Premise Breach: South Perimeter & Courtyard">
           </div>
           <div class="form-group">
-            <label for="invCameraInput">Camera ID / Label</label>
-            <input type="text" id="invCameraInput" placeholder="e.g. cam-north-01">
+            <label for="invCameraInput">Camera ID(s) (comma-separated summary)</label>
+            <input type="text" id="invCameraInput" placeholder="e.g. cam-north-01, cam-lobby-02">
           </div>
         </div>
 
         <div class="form-group">
           <label for="invObjectiveInput">Forensic Objective &amp; Target Questions</label>
-          <textarea id="invObjectiveInput" rows="2" placeholder="e.g. Identify all unauthorized entries into restricted zone between 00:00 and 01:00. Verify clothing and carried objects."></textarea>
+          <textarea id="invObjectiveInput" rows="2" placeholder="e.g. Identify all unauthorized entries into restricted premise zones. Establish chronological event timeline across surveillance feeds."></textarea>
         </div>
 
         <div class="form-grid-3">
@@ -376,7 +411,7 @@
             <input type="number" id="invSampleInterval" value="2.0" step="0.5" min="0.5" max="10.0">
           </div>
           <div class="form-group">
-            <label for="invMaxFrames">Max Frames</label>
+            <label for="invMaxFrames">Max Frames (per feed)</label>
             <input type="number" id="invMaxFrames" value="30" step="5" min="5" max="150">
           </div>
           <div class="form-group">
@@ -392,6 +427,48 @@
           <button type="button" class="btn btn-secondary" id="cancelNewInvBtn">Cancel</button>
           <button type="submit" class="btn btn-primary" id="startInvBtn">
             <span class="btn-spinner hidden" id="uploadSpinner">&#x21bb;</span> Launch Autonomous Agents
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal 1b: Add Additional Camera Feed to Active Case -->
+  <div id="addFeedModal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <div>
+          <h3>&#x1F4F9; Ingest Additional Camera Feed</h3>
+          <p class="modal-subtitle">Add surveillance footage to active premise investigation</p>
+        </div>
+        <button class="modal-close" id="closeAddFeedModal">&times;</button>
+      </div>
+      <form id="addFeedForm" class="modal-body">
+        <input type="file" id="addFeedFileInput" accept="video/*,.mp4,.mkv,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts" class="file-input-hidden">
+        <div class="drop-zone" id="addFeedDropZone" style="padding:1.25rem;">
+          <div class="drop-icon" style="font-size:1.6rem;">&#x1F4F9;</div>
+          <div class="drop-text" style="font-size:0.8rem;">Select or drop additional video footage</div>
+          <div class="drop-actions">
+            <button type="button" class="btn btn-secondary btn-sm" id="browseSingleFeedBtn">&#x1F4C2; Browse Video File</button>
+          </div>
+          <div id="addFeedSelectedLabel" class="selected-file-label hidden" style="margin-top:6px;"></div>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="addFeedCameraId">Camera ID *</label>
+            <input type="text" id="addFeedCameraId" required placeholder="e.g. cam-courtyard-02">
+          </div>
+          <div class="form-group">
+            <label for="addFeedCameraName">Camera Location / Name</label>
+            <input type="text" id="addFeedCameraName" placeholder="e.g. South Perimeter Courtyard">
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="cancelAddFeedBtn">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="submitAddFeedBtn">
+            <span class="btn-spinner hidden" id="addFeedSpinner">&#x21bb;</span> Ingest &amp; Correlate Feed
           </button>
         </div>
       </form>
@@ -481,7 +558,7 @@
         </div>
         <div class="form-group">
           <label for="finNotesInput">Case Sign-Off Notes / Chain of Custody Remarks</label>
-          <textarea id="finNotesInput" rows="3" placeholder="Case concluded with verified evidence. Playable video sub-clips sliced for all confirmed events and embedded in final report."></textarea>
+          <textarea id="finNotesInput" rows="3" placeholder="Case concluded with verified evidence across surveillance feeds. Playable video sub-clips sliced for all confirmed events and embedded in final report."></textarea>
         </div>
         <div class="form-group">
           <label class="checkbox-label">
@@ -537,6 +614,6 @@
   <div id="toastContainer" class="toast-container"></div>
 
   <!-- Application Script -->
-  <script src="/ui/app.js"></script>
+  <script src="/ui/app.js?v=2.2"></script>
 </body>
 </html>

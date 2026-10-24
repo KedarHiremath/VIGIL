@@ -613,10 +613,12 @@ class SqliteInvestigationRepository(InvestigationRepository):
     def list_investigations(self) -> list[Investigation]:
         with self._lock:
             cursor = self._conn.execute("SELECT payload FROM investigations")
-            return [
+            items = [
                 Investigation.model_validate_json(row["payload"])
                 for row in cursor.fetchall()
             ]
+            items.sort(key=lambda x: x.created_at, reverse=True)
+            return items
 
     def save_state(self, state: InvestigationState) -> InvestigationState:
         with self._lock, self._conn:

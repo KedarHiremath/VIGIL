@@ -1,6 +1,7 @@
 /**
  * VIGIL Video Forensics Mission Control - Interactive Application Logic
  * Full autonomous multi-agent forensic suite frontend
+ * Enhanced with Multi-Video Premise Correlation & Cross-Camera Timeline Switching
  */
 
 (function () {
@@ -20,8 +21,10 @@
     ws: null,
     activeFilter: "all",
     eventSearchQuery: "",
-    selectedFile: null,
-    currentMediaSource: "primary", // "primary" or artifactId
+    selectedFiles: [],
+    selectedFeeds: [],
+    currentMediaAssetId: null,
+    currentMediaSource: "video", // "video" or "artifact"
   };
 
   // DOM Elements
@@ -63,6 +66,8 @@
     playbackSpeedSelect: document.getElementById("playbackSpeedSelect"),
     quickClipBtn: document.getElementById("quickClipBtn"),
     sourceMetaText: document.getElementById("sourceMetaText"),
+    cameraFeedSelect: document.getElementById("cameraFeedSelect"),
+    cameraFeedPickerWrap: document.getElementById("cameraFeedPickerWrap"),
     timelineTrack: document.getElementById("timelineTrack"),
     timelineTicks: document.getElementById("timelineTicks"),
     timelineProgress: document.getElementById("timelineProgress"),
@@ -99,9 +104,35 @@
     newInvForm: document.getElementById("newInvForm"),
     dropZone: document.getElementById("dropZone"),
     videoFileInput: document.getElementById("videoFileInput"),
+    browseVideosBtn: document.getElementById("browseVideosBtn"),
+    addMoreVideosBtn: document.getElementById("addMoreVideosBtn"),
+    clearAllVideosBtn: document.getElementById("clearAllVideosBtn"),
+    selectedFeedsQueue: document.getElementById("selectedFeedsQueue"),
+    selectedFeedsList: document.getElementById("selectedFeedsList"),
+    selectedFeedCount: document.getElementById("selectedFeedCount"),
+    invTitleInput: document.getElementById("invTitleInput"),
+    invCameraInput: document.getElementById("invCameraInput"),
+    invObjectiveInput: document.getElementById("invObjectiveInput"),
+    invSampleInterval: document.getElementById("invSampleInterval"),
+    invMaxFrames: document.getElementById("invMaxFrames"),
+    invExtractAudio: document.getElementById("invExtractAudio"),
     selectedFileLabel: document.getElementById("selectedFileLabel"),
     uploadSpinner: document.getElementById("uploadSpinner"),
     startInvBtn: document.getElementById("startInvBtn"),
+    // Add feed modal
+    openAddFeedModalBtn: document.getElementById("openAddFeedModalBtn"),
+    addFeedModal: document.getElementById("addFeedModal"),
+    closeAddFeedModal: document.getElementById("closeAddFeedModal"),
+    cancelAddFeedBtn: document.getElementById("cancelAddFeedBtn"),
+    addFeedForm: document.getElementById("addFeedForm"),
+    addFeedFileInput: document.getElementById("addFeedFileInput"),
+    addFeedDropZone: document.getElementById("addFeedDropZone"),
+    browseSingleFeedBtn: document.getElementById("browseSingleFeedBtn"),
+    addFeedSelectedLabel: document.getElementById("addFeedSelectedLabel"),
+    addFeedCameraId: document.getElementById("addFeedCameraId"),
+    addFeedCameraName: document.getElementById("addFeedCameraName"),
+    submitAddFeedBtn: document.getElementById("submitAddFeedBtn"),
+    addFeedSpinner: document.getElementById("addFeedSpinner"),
     reviewModal: document.getElementById("reviewModal"),
     closeReviewModal: document.getElementById("closeReviewModal"),
     cancelReviewBtn: document.getElementById("cancelReviewBtn"),
@@ -167,7 +198,7 @@
   // -------------------------------------------------------------------------
   // Investigation Lifecycle Management
   // -------------------------------------------------------------------------
-  async function loadInvestigations() {
+  async function loadInvestigations(targetInvId = null) {
     try {
       const items = await apiFetch("/api/v1/investigations");
       state.investigations = items;
@@ -187,12 +218,12 @@
         el.invSelect.appendChild(opt);
       });
 
-      if (!state.activeInvestigationId || !items.find(i => i.investigation_id === state.activeInvestigationId)) {
-        setActiveInvestigation(items[0].investigation_id);
-      } else {
-        el.invSelect.value = state.activeInvestigationId;
-        refreshActiveCase();
-      }
+      const toSelect = targetInvId
+        || (state.activeInvestigationId && items.some(i => i.investigation_id === state.activeInvestigationId)
+            ? state.activeInvestigationId
+            : items[0].investigation_id);
+
+      setActiveInvestigation(toSelect);
     } catch (err) {
       console.error("Could not load investigations:", err);
     }
@@ -201,7 +232,8 @@
   function setActiveInvestigation(invId) {
     state.activeInvestigationId = invId;
     el.invSelect.value = invId;
-    state.currentMediaSource = "primary";
+    state.currentMediaSource = "video";
+    state.currentMediaAssetId = null;
     connectWebSocket(invId);
     refreshActiveCase();
   }
@@ -212,9 +244,8 @@
 
     try {
       const res = await apiFetch("/api/v1/investigations/demo", { method: "POST" });
-      showToast("Demo case seeded with synthetic footage, frames, audio & observations!", "success");
-      await loadInvestigations();
-      setActiveInvestigation(res.investigation_id);
+      showToast("Premise multi-camera demo case loaded with synchronized feeds!", "success");
+      await loadInvestigations(res.investigation_id);
     } catch (err) {
       showToast("Failed to load demo case: " + err.message, "error");
     } finally {
@@ -235,24 +266,35 @@
 
       // 2. Full investigation details
       const invData = await apiFetch(`/api/v1/investigations/${invId}`);
-      if (invData.camera_id) {
-        el.hudCameraId.textContent = `CAM: ${invData.camera_id.toUpperCase()}`;
-      } else {
-        el.hudCameraId.textContent = "CAM: PRIMARY";
-      }
 
-      // 3. Media assets
+      // 3. Media assets (multi-video premise feeds)
       try {
         state.mediaAssets = await apiFetch(`/api/v1/investigations/${invId}/media`);
       } catch {
         state.mediaAssets = [];
       }
 
+      // Update camera feed selector dropdown
+      updateCameraFeedSelector(invData);
+
+      // Immediately load and show the surveillance video feed
+      if (state.currentMediaSource !== "artifact") {
+        if (state.currentMediaAssetId) {
+          switchCameraFeed(state.currentMediaAssetId, false);
+        } else {
+          loadPrimaryVideo();
+        }
+      }
+
       // 4. Events
-      const eventsData = await apiFetch(`/api/v1/investigations/${invId}/events`);
-      state.events = eventsData;
-      renderEvents();
-      renderTimelineMarkers();
+      try {
+        const eventsData = await apiFetch(`/api/v1/investigations/${invId}/events`);
+        state.events = eventsData;
+        renderEvents();
+        renderTimelineMarkers();
+      } catch {
+        state.events = [];
+      }
 
       // 5. Observations
       try {
@@ -263,9 +305,13 @@
       renderObservations();
 
       // 6. Artifacts (frames, audio, clips)
-      const artifactsData = await apiFetch(`/api/v1/investigations/${invId}/artifacts`);
-      state.artifacts = artifactsData;
-      renderArtifacts();
+      try {
+        const artifactsData = await apiFetch(`/api/v1/investigations/${invId}/artifacts`);
+        state.artifacts = artifactsData;
+        renderArtifacts();
+      } catch {
+        state.artifacts = [];
+      }
 
       // 7. Evidence assessments
       try {
@@ -276,13 +322,12 @@
       renderAssessments();
 
       // 8. Audit logs
-      const auditData = await apiFetch(`/api/v1/investigations/${invId}/audit`);
-      state.auditLogs = auditData;
-      renderAuditLogs();
-
-      // 9. Video loading
-      if (state.currentMediaSource === "primary") {
-        loadPrimaryVideo();
+      try {
+        const auditData = await apiFetch(`/api/v1/investigations/${invId}/audit`);
+        state.auditLogs = auditData;
+        renderAuditLogs();
+      } catch {
+        state.auditLogs = [];
       }
 
       // 10. Report preview
@@ -293,6 +338,34 @@
 
     } catch (err) {
       console.warn("Error refreshing active case:", err);
+    }
+  }
+
+  function updateCameraFeedSelector(invData) {
+    if (!el.cameraFeedSelect) return;
+    el.cameraFeedSelect.innerHTML = "";
+
+    if (state.mediaAssets && state.mediaAssets.length > 0) {
+      state.mediaAssets.forEach((ma, idx) => {
+        const opt = document.createElement("option");
+        opt.value = ma.media_asset_id;
+        const camLabel = ma.camera_id ? ma.camera_id.toUpperCase() : `CAM-${idx + 1}`;
+        const fileName = ma.file_path ? ma.file_path.split(/[\\/]/).pop() : ma.media_asset_id;
+        opt.textContent = `${camLabel} (${fileName})`;
+        el.cameraFeedSelect.appendChild(opt);
+      });
+
+      // Keep current selection if valid, or default to first
+      if (!state.mediaAssets.some(m => m.media_asset_id === state.currentMediaAssetId)) {
+        state.currentMediaAssetId = state.mediaAssets[0].media_asset_id;
+      }
+      el.cameraFeedSelect.value = state.currentMediaAssetId;
+    } else {
+      const opt = document.createElement("option");
+      opt.value = "primary";
+      opt.textContent = invData?.camera_id ? `CAM: ${invData.camera_id.toUpperCase()}` : "Primary Feed";
+      el.cameraFeedSelect.appendChild(opt);
+      state.currentMediaAssetId = "primary";
     }
   }
 
@@ -460,10 +533,16 @@
   });
 
   // -------------------------------------------------------------------------
-  // Video Player & Controls
+  // Video Player & Camera Feed Switching
   // -------------------------------------------------------------------------
   function loadPrimaryVideo() {
-    state.currentMediaSource = "primary";
+    if (state.mediaAssets && state.mediaAssets.length > 0) {
+      switchCameraFeed(state.mediaAssets[0].media_asset_id, false);
+      return;
+    }
+
+    state.currentMediaSource = "video";
+    state.currentMediaAssetId = "primary";
     const invId = state.activeInvestigationId;
     if (!invId) {
       el.videoPlaceholder.classList.remove("hidden");
@@ -471,25 +550,73 @@
     }
 
     const primaryUrl = `/api/v1/investigations/${invId}/media/primary/content`;
-    
-    // Check if player already loaded this src to prevent reloading
     if (!el.mainVideoPlayer.src.includes(primaryUrl)) {
       el.mainVideoPlayer.src = primaryUrl;
       el.mainVideoPlayer.load();
+      el.mainVideoPlayer.addEventListener("loadeddata", function paintFirstFrame() {
+        if (el.mainVideoPlayer.currentTime === 0) {
+          el.mainVideoPlayer.currentTime = 0.001;
+        }
+      }, { once: true });
+    }
+
+    el.videoPlaceholder.classList.add("hidden");
+    el.hudCameraId.textContent = "CAM: PRIMARY";
+    el.sourceMetaText.textContent = "SHA-256: PRIMARY_FOOTAGE_STREAM";
+  }
+
+  function switchCameraFeed(mediaAssetId, preservePlayhead = true) {
+    state.currentMediaSource = "video";
+    state.currentMediaAssetId = mediaAssetId;
+    const invId = state.activeInvestigationId;
+    if (!invId) return;
+
+    const streamUrl = `/api/v1/investigations/${invId}/media/${mediaAssetId}/content`;
+    const curTime = preservePlayhead ? el.mainVideoPlayer.currentTime : 0;
+
+    if (!el.mainVideoPlayer.src.includes(streamUrl)) {
+      el.mainVideoPlayer.src = streamUrl;
+      el.mainVideoPlayer.load();
+
+      el.mainVideoPlayer.addEventListener("loadeddata", function paintFirstFrame() {
+        if (el.mainVideoPlayer.currentTime === 0) {
+          el.mainVideoPlayer.currentTime = 0.001;
+        }
+      }, { once: true });
+
+      if (curTime > 0) {
+        el.mainVideoPlayer.addEventListener("loadedmetadata", function seekOnLoad() {
+          el.mainVideoPlayer.currentTime = curTime;
+          el.mainVideoPlayer.removeEventListener("loadedmetadata", seekOnLoad);
+        });
+      }
     }
 
     el.videoPlaceholder.classList.add("hidden");
 
-    if (state.mediaAssets.length > 0) {
-      const ma = state.mediaAssets[0];
-      el.sourceMetaText.textContent = `SHA-256: ${(ma.sha256 || "verified").slice(0, 16)}... | ${ma.media_type.toUpperCase()}`;
-    } else {
-      el.sourceMetaText.textContent = "SHA-256: PRIMARY_FOOTAGE_STREAM";
+    // Look up media asset details
+    const ma = state.mediaAssets.find(m => m.media_asset_id === mediaAssetId);
+    if (ma) {
+      const camId = ma.camera_id ? ma.camera_id.toUpperCase() : "CAM";
+      el.hudCameraId.textContent = `CAM: ${camId}`;
+      const resInfo = (ma.width && ma.height) ? ` | ${ma.width}x${ma.height}` : "";
+      const fpsInfo = ma.fps ? ` @ ${ma.fps.toFixed(1)}fps` : "";
+      el.sourceMetaText.textContent = `SHA-256: ${(ma.sha256 || "verified").slice(0, 16)}... | ${camId}${resInfo}${fpsInfo}`;
+    }
+
+    if (el.cameraFeedSelect && el.cameraFeedSelect.value !== mediaAssetId) {
+      el.cameraFeedSelect.value = mediaAssetId;
     }
   }
 
+  if (el.cameraFeedSelect) {
+    el.cameraFeedSelect.addEventListener("change", (e) => {
+      switchCameraFeed(e.target.value, true);
+    });
+  }
+
   function playArtifact(artifactId) {
-    state.currentMediaSource = artifactId;
+    state.currentMediaSource = "artifact";
     const invId = state.activeInvestigationId;
     const streamUrl = `/api/v1/investigations/${invId}/artifacts/${artifactId}/content`;
 
@@ -588,7 +715,6 @@
   // Quick Cut Clip from Playhead
   el.quickClipBtn.addEventListener("click", async () => {
     const curTime = el.mainVideoPlayer.currentTime;
-    const dur = el.mainVideoPlayer.duration || 10;
     const invId = state.activeInvestigationId;
 
     if (!invId) {
@@ -596,7 +722,6 @@
       return;
     }
 
-    // Check if an existing event overlaps with current playhead
     const matchingEvent = state.events.find(
       e => e.start_seconds !== null && e.end_seconds !== null && curTime >= e.start_seconds && curTime <= e.end_seconds
     );
@@ -604,7 +729,6 @@
     if (matchingEvent) {
       await sliceEventClipDirectly(matchingEvent.event_id);
     } else if (state.events.length > 0) {
-      // Slice first available event or slice around playhead
       await sliceEventClipDirectly(state.events[0].event_id);
     } else {
       showToast(`Playhead at ${formatTime(curTime)}. Correlate an event to slice dedicated incident clip.`, "info");
@@ -678,9 +802,19 @@
         `;
       }
 
+      // Check if event mentions camera
+      let cameraBadgeHtml = "";
+      const matchedCam = state.mediaAssets.find(ma => ma.camera_id && evt.description.toLowerCase().includes(ma.camera_id.toLowerCase()));
+      if (matchedCam) {
+        cameraBadgeHtml = `<span class="badge cam-badge">${matchedCam.camera_id.toUpperCase()}</span>`;
+      }
+
       card.innerHTML = `
         <div class="event-card-head">
-          <span class="event-card-type">${evt.event_type.replace(/_/g, " ").toUpperCase()}</span>
+          <div style="display:flex; align-items:center; gap:6px;">
+            <span class="event-card-type">${evt.event_type.replace(/_/g, " ").toUpperCase()}</span>
+            ${cameraBadgeHtml}
+          </div>
           <span class="status-pill status-${evt.status}">${evt.status}</span>
         </div>
         <div class="event-card-id">#${evt.event_id} &bull; Interval: <strong>${timeRange}</strong></div>
@@ -700,6 +834,9 @@
       card.querySelector(".btn-reject").addEventListener("click", () => openReviewModal(evt, "rejected"));
       card.querySelector(".btn-edit").addEventListener("click", () => openReviewModal(evt, evt.status));
       card.querySelector(".btn-seek").addEventListener("click", () => {
+        if (matchedCam) {
+          switchCameraFeed(matchedCam.media_asset_id, false);
+        }
         if (evt.start_seconds !== null) el.mainVideoPlayer.currentTime = evt.start_seconds;
       });
       card.querySelector(".btn-clip").addEventListener("click", () => sliceEventClipDirectly(evt.event_id));
@@ -722,7 +859,6 @@
 
       showToast(`Incident clip ${artifact.artifact_id} sliced successfully!`, "success");
       await refreshActiveCase();
-      // Switch to clips tab
       const clipTab = el.mediaTabs.querySelector('[data-tab="clips"]');
       if (clipTab) clipTab.click();
     } catch (err) {
@@ -811,7 +947,6 @@
     // Render Audio Trail & Frames
     el.frameGallery.innerHTML = "";
 
-    // Display Audio Trail if extracted
     if (audioArtifacts.length > 0) {
       audioArtifacts.forEach((aud) => {
         const audioBox = document.createElement("div");
@@ -838,6 +973,7 @@
         card.className = "frame-card";
         const startSec = f.source_reference?.start_seconds;
         const timecodeStr = startSec !== null && startSec !== undefined ? formatTime(startSec) : "--:--";
+        const assetId = f.source_reference?.media_asset_id;
 
         card.innerHTML = `
           <img class="frame-thumb" src="/api/v1/investigations/${state.activeInvestigationId}/artifacts/${f.artifact_id}/content" alt="Frame" loading="lazy">
@@ -847,6 +983,9 @@
           </div>
         `;
         card.addEventListener("click", () => {
+          if (assetId && state.mediaAssets.some(m => m.media_asset_id === assetId)) {
+            switchCameraFeed(assetId, false);
+          }
           if (startSec !== null && startSec !== undefined) {
             el.mainVideoPlayer.currentTime = startSec;
           }
@@ -891,7 +1030,11 @@
         el.clipsGalleryView.classList.remove("hidden");
       } else {
         el.clipsGalleryView.classList.add("hidden");
-        loadPrimaryVideo();
+        if (state.currentMediaAssetId) {
+          switchCameraFeed(state.currentMediaAssetId, false);
+        } else {
+          loadPrimaryVideo();
+        }
       }
     });
   });
@@ -935,7 +1078,7 @@
     el.observationsTable.innerHTML = "";
 
     if (state.observations.length === 0) {
-      el.observationsTable.innerHTML = `<tr><td colspan="7" style="text-align:center;">No observations recorded for this investigation.</td></tr>`;
+      el.observationsTable.innerHTML = `<tr><td colspan="8" style="text-align:center;">No observations recorded for this investigation.</td></tr>`;
       return;
     }
 
@@ -963,8 +1106,29 @@
       const provName = obs.provenance ? `${obs.provenance.producer_name}` : "-";
       const cleanDesc = cleanObservationDesc(obs.description);
 
+      // Determine Camera Attribution
+      let camLabel = "MAIN";
+      let targetAssetId = sr?.media_asset_id || null;
+
+      if (obs.camera_id) {
+        camLabel = obs.camera_id;
+      } else {
+        const camPrefixMatch = cleanDesc.match(/^\[([a-zA-Z0-9_\-]+):/);
+        if (camPrefixMatch) {
+          camLabel = camPrefixMatch[1];
+        } else if (targetAssetId) {
+          const ma = state.mediaAssets.find(m => m.media_asset_id === targetAssetId);
+          if (ma && ma.camera_id) camLabel = ma.camera_id;
+        }
+      }
+
+      // Check if camera label maps to an asset
+      const matchedAsset = state.mediaAssets.find(m => m.camera_id && m.camera_id.toLowerCase() === camLabel.toLowerCase()) ||
+                           state.mediaAssets.find(m => m.media_asset_id === targetAssetId);
+
       row.innerHTML = `
         <td><code>${obs.observation_id}</code></td>
+        <td><span class="cam-badge">${camLabel.toUpperCase()}</span></td>
         <td><span class="modality-badge ${modClass}">${obs.modality}</span></td>
         <td><strong>${obs.observation_type.replace(/_/g, " ")}</strong></td>
         <td>${intervalStr}</td>
@@ -973,9 +1137,12 @@
         <td><small style="color:var(--text-dim);">${provName}</small></td>
       `;
 
-      // Clicking an observation seeks to start time
+      // Clicking an observation jumps player to corresponding camera feed & timecode
       row.style.cursor = "pointer";
       row.addEventListener("click", () => {
+        if (matchedAsset) {
+          switchCameraFeed(matchedAsset.media_asset_id, false);
+        }
         if (sr && sr.start_seconds !== null) {
           el.mainVideoPlayer.currentTime = sr.start_seconds;
         }
@@ -1159,8 +1326,35 @@
   });
 
   // -------------------------------------------------------------------------
-  // New Investigation Modal & Upload
+  // New Investigation Modal & Multi-Video Sequential Ingestion
   // -------------------------------------------------------------------------
+  let isAppendingVideos = false;
+  let userEditedTitle = false;
+
+  function escapeHtml(str) {
+    if (!str) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function suggestCameraId(filename, index) {
+    if (!filename) return `cam-${String(index + 1).padStart(2, "0")}`;
+    const clean = filename.toLowerCase();
+    const camMatch = clean.match(/(?:cam(?:era)?)[-_]?([a-zA-Z0-9]+)/);
+    if (camMatch && camMatch[1]) {
+      return `cam-${camMatch[1]}`;
+    }
+    const locMatch = clean.match(/(gate|lobby|courtyard|perimeter|north|south|east|west|hallway|entrance|exit|corridor|parking|driveway)/i);
+    if (locMatch && locMatch[1]) {
+      return `cam-${locMatch[1].toLowerCase()}`;
+    }
+    return `cam-${String(index + 1).padStart(2, "0")}`;
+  }
+
   function openNewInvModal() {
     el.newInvModal.classList.remove("hidden");
   }
@@ -1170,44 +1364,212 @@
   el.closeNewInvModal.addEventListener("click", () => el.newInvModal.classList.add("hidden"));
   el.cancelNewInvBtn.addEventListener("click", () => el.newInvModal.classList.add("hidden"));
 
-  // Drag and Drop
-  el.dropZone.addEventListener("click", () => el.videoFileInput.click());
-  el.dropZone.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    el.dropZone.classList.add("dragover");
-  });
-  el.dropZone.addEventListener("dragleave", () => el.dropZone.classList.remove("dragover"));
-  el.dropZone.addEventListener("drop", (e) => {
-    e.preventDefault();
-    el.dropZone.classList.remove("dragover");
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      handleSelectedFile(e.dataTransfer.files[0]);
-    }
-  });
-  el.videoFileInput.addEventListener("change", () => {
-    if (el.videoFileInput.files && el.videoFileInput.files[0]) {
-      handleSelectedFile(el.videoFileInput.files[0]);
-    }
-  });
-
-  function handleSelectedFile(file) {
-    state.selectedFile = file;
-    el.selectedFileLabel.textContent = `Selected: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`;
-    el.selectedFileLabel.classList.remove("hidden");
+  if (el.invTitleInput) {
+    el.invTitleInput.addEventListener("input", () => {
+      userEditedTitle = el.invTitleInput.value.trim().length > 0;
+    });
   }
 
+  function syncCameraIdsSummary() {
+    if (!el.invCameraInput) return;
+    const ids = state.selectedFeeds.map(f => f.cameraId.trim()).filter(Boolean);
+    el.invCameraInput.value = ids.join(", ");
+  }
+
+  function renderSelectedFeeds() {
+    if (!el.selectedFeedsQueue || !el.selectedFeedsList) return;
+
+    const count = state.selectedFeeds.length;
+    if (el.selectedFeedCount) el.selectedFeedCount.textContent = count;
+
+    if (count === 0) {
+      el.selectedFeedsQueue.classList.add("hidden");
+      if (el.addMoreVideosBtn) el.addMoreVideosBtn.classList.add("hidden");
+      if (el.clearAllVideosBtn) el.clearAllVideosBtn.classList.add("hidden");
+      if (el.browseVideosBtn) el.browseVideosBtn.textContent = "📁 Select Video Files (Multiple)";
+      if (!userEditedTitle && el.invTitleInput) el.invTitleInput.value = "";
+      syncCameraIdsSummary();
+      return;
+    }
+
+    el.selectedFeedsQueue.classList.remove("hidden");
+    if (el.addMoreVideosBtn) el.addMoreVideosBtn.classList.remove("hidden");
+    if (el.clearAllVideosBtn) el.clearAllVideosBtn.classList.remove("hidden");
+    if (el.browseVideosBtn) el.browseVideosBtn.textContent = "🔄 Replace All Files";
+
+    el.selectedFeedsList.innerHTML = state.selectedFeeds.map((feed, idx) => `
+      <div class="feed-row-item" data-feed-id="${feed.id}">
+        <span class="feed-num-pill">FEED ${idx + 1}</span>
+        <div class="feed-details">
+          <div class="feed-file-name" title="${escapeHtml(feed.name)}">&#x1F4F9; ${escapeHtml(feed.name)}</div>
+          <div class="feed-file-size">${(feed.size / (1024 * 1024)).toFixed(2)} MB</div>
+        </div>
+        <div class="feed-cam-assign">
+          <label>CAM ID:</label>
+          <input type="text" class="feed-cam-input" data-index="${idx}" value="${escapeHtml(feed.cameraId)}" placeholder="cam-${idx + 1}">
+        </div>
+        <button type="button" class="feed-remove-btn" data-index="${idx}" title="Remove this video feed">&times;</button>
+      </div>
+    `).join("");
+
+    // Wire camera ID inputs
+    el.selectedFeedsList.querySelectorAll(".feed-cam-input").forEach((inp) => {
+      inp.addEventListener("input", (e) => {
+        const idx = parseInt(e.target.dataset.index, 10);
+        if (state.selectedFeeds[idx]) {
+          state.selectedFeeds[idx].cameraId = e.target.value.trim();
+          syncCameraIdsSummary();
+        }
+      });
+    });
+
+    // Wire remove buttons
+    el.selectedFeedsList.querySelectorAll(".feed-remove-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const idx = parseInt(e.target.dataset.index, 10);
+        removeSelectedFeed(idx);
+      });
+    });
+
+    // Update auto title if not customized
+    if (!userEditedTitle && el.invTitleInput) {
+      if (count === 1) {
+        el.invTitleInput.value = `Premise Investigation: ${state.selectedFeeds[0].name}`;
+      } else {
+        el.invTitleInput.value = `Premise Multi-Feed Investigation (${count} cameras)`;
+      }
+    }
+
+    syncCameraIdsSummary();
+  }
+
+  function handleFilesSelection(fileList, append = false) {
+    if (!fileList || fileList.length === 0) return;
+    const newFiles = Array.from(fileList);
+
+    if (!append) {
+      state.selectedFeeds = [];
+    }
+
+    newFiles.forEach((file) => {
+      const exists = state.selectedFeeds.some(f => f.name === file.name && f.size === file.size);
+      if (!exists) {
+        const nextIdx = state.selectedFeeds.length;
+        const camId = suggestCameraId(file.name, nextIdx);
+        state.selectedFeeds.push({
+          id: Math.random().toString(36).slice(2, 9),
+          file: file,
+          name: file.name,
+          size: file.size,
+          cameraId: camId,
+        });
+      }
+    });
+
+    state.selectedFiles = state.selectedFeeds.map(f => f.file);
+    renderSelectedFeeds();
+  }
+
+  function removeSelectedFeed(index) {
+    if (index >= 0 && index < state.selectedFeeds.length) {
+      state.selectedFeeds.splice(index, 1);
+      state.selectedFiles = state.selectedFeeds.map(f => f.file);
+      renderSelectedFeeds();
+    }
+  }
+
+  function clearSelectedFeeds() {
+    state.selectedFeeds = [];
+    state.selectedFiles = [];
+    if (el.videoFileInput) el.videoFileInput.value = "";
+    userEditedTitle = false;
+    renderSelectedFeeds();
+  }
+
+  // Browse multiple videos button
+  if (el.browseVideosBtn) {
+    el.browseVideosBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      isAppendingVideos = false;
+      el.videoFileInput.value = "";
+      el.videoFileInput.click();
+    });
+  }
+
+  // Add more videos button
+  if (el.addMoreVideosBtn) {
+    el.addMoreVideosBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      isAppendingVideos = true;
+      el.videoFileInput.value = "";
+      el.videoFileInput.click();
+    });
+  }
+
+  // Clear all button
+  if (el.clearAllVideosBtn) {
+    el.clearAllVideosBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      clearSelectedFeeds();
+    });
+  }
+
+  // File input change handler
+  if (el.videoFileInput) {
+    el.videoFileInput.addEventListener("change", () => {
+      if (el.videoFileInput.files && el.videoFileInput.files.length > 0) {
+        handleFilesSelection(el.videoFileInput.files, isAppendingVideos);
+      }
+    });
+  }
+
+  // Drop zone events (avoid opening dialog if user clicked an inner button)
+  if (el.dropZone) {
+    el.dropZone.addEventListener("click", (e) => {
+      if (e.target.closest("button") || e.target.closest("input")) return;
+      isAppendingVideos = state.selectedFeeds.length > 0;
+      el.videoFileInput.value = "";
+      el.videoFileInput.click();
+    });
+    el.dropZone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      el.dropZone.classList.add("dragover");
+    });
+    el.dropZone.addEventListener("dragleave", () => el.dropZone.classList.remove("dragover"));
+    el.dropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      el.dropZone.classList.remove("dragover");
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        handleFilesSelection(e.dataTransfer.files, true);
+      }
+    });
+  }
+
+  // Form Submission
   el.newInvForm.addEventListener("submit", async (e) => {
     e.preventDefault();
-    if (!state.selectedFile) {
-      showToast("Please select a video footage file.", "error");
+    if (!state.selectedFeeds || state.selectedFeeds.length === 0) {
+      showToast("Please select at least one video footage file.", "error");
       return;
     }
 
     const formData = new FormData();
-    formData.append("file", state.selectedFile);
-    formData.append("title", document.getElementById("invTitleInput").value.trim() || `Investigation: ${state.selectedFile.name}`);
-    formData.append("camera_id", document.getElementById("invCameraInput").value.trim() || "cam-main");
-    formData.append("objective", document.getElementById("invObjectiveInput").value.trim() || "Perform complete multi-modal video and acoustic investigation.");
+    state.selectedFeeds.forEach((feed) => {
+      formData.append("files", feed.file);
+    });
+
+    const titleInputVal = el.invTitleInput ? el.invTitleInput.value.trim() : "";
+    const titleVal = titleInputVal || (state.selectedFeeds.length > 1
+      ? `Premise Multi-Feed Investigation (${state.selectedFeeds.length} cameras)`
+      : `Investigation: ${state.selectedFeeds[0].name}`);
+    formData.append("title", titleVal);
+
+    const cameraIds = state.selectedFeeds.map(f => f.cameraId.trim() || "cam-main");
+    formData.append("camera_ids", cameraIds.join(", "));
+    formData.append("camera_id", cameraIds[0] || "cam-main");
+
+    formData.append("objective", document.getElementById("invObjectiveInput").value.trim() || "Perform complete multi-modal video and acoustic investigation across all premise feeds.");
     formData.append("sample_interval_seconds", document.getElementById("invSampleInterval").value);
     formData.append("max_frames", document.getElementById("invMaxFrames").value);
     formData.append("extract_audio", document.getElementById("invExtractAudio").value);
@@ -1215,6 +1577,8 @@
 
     el.startInvBtn.disabled = true;
     el.uploadSpinner.classList.remove("hidden");
+    const count = state.selectedFeeds.length;
+    showToast(`Ingesting ${count} video feed(s) sequentially & initiating cross-camera analysis...`, "info");
 
     try {
       const res = await fetch("/api/v1/investigations", {
@@ -1228,14 +1592,13 @@
       }
 
       const inv = await res.json();
-      showToast(`Investigation ${inv.investigation_id} created and running!`, "success");
+      const countMsg = inv.media_count ? ` (${inv.media_count} feeds ingested)` : "";
+      showToast(`Investigation ${inv.investigation_id} created and running${countMsg}!`, "success");
       el.newInvModal.classList.add("hidden");
       el.newInvForm.reset();
-      state.selectedFile = null;
-      el.selectedFileLabel.classList.add("hidden");
+      clearSelectedFeeds();
 
-      await loadInvestigations();
-      setActiveInvestigation(inv.investigation_id);
+      await loadInvestigations(inv.investigation_id);
     } catch (err) {
       showToast(err.message, "error");
     } finally {
@@ -1243,6 +1606,137 @@
       el.uploadSpinner.classList.add("hidden");
     }
   });
+
+  // -------------------------------------------------------------------------
+  // Add Additional Camera Feed Modal (Active Investigation)
+  // -------------------------------------------------------------------------
+  if (el.openAddFeedModalBtn) {
+    el.openAddFeedModalBtn.addEventListener("click", () => {
+      if (!state.activeInvestigationId) {
+        showToast("Please select or load an active investigation first.", "warning");
+        return;
+      }
+      if (el.addFeedCameraId) {
+        const nextCamNum = (state.mediaAssets ? state.mediaAssets.length : 0) + 1;
+        el.addFeedCameraId.value = `cam-${String(nextCamNum).padStart(2, "0")}`;
+      }
+      el.addFeedModal.classList.remove("hidden");
+    });
+  }
+
+  if (el.closeAddFeedModal) el.closeAddFeedModal.addEventListener("click", () => el.addFeedModal.classList.add("hidden"));
+  if (el.cancelAddFeedBtn) el.cancelAddFeedBtn.addEventListener("click", () => el.addFeedModal.classList.add("hidden"));
+
+  if (el.browseSingleFeedBtn && el.addFeedFileInput) {
+    el.browseSingleFeedBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      el.addFeedFileInput.click();
+    });
+  }
+
+  if (el.addFeedDropZone && el.addFeedFileInput) {
+    el.addFeedDropZone.addEventListener("click", (e) => {
+      if (e.target.closest("button") || e.target.closest("input")) return;
+      el.addFeedFileInput.click();
+    });
+    el.addFeedDropZone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      el.addFeedDropZone.classList.add("dragover");
+    });
+    el.addFeedDropZone.addEventListener("dragleave", () => el.addFeedDropZone.classList.remove("dragover"));
+    el.addFeedDropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      el.addFeedDropZone.classList.remove("dragover");
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        el.addFeedFileInput.files = e.dataTransfer.files;
+        updateAddFeedFileLabel();
+      }
+    });
+  }
+
+  function updateAddFeedFileLabel() {
+    if (!el.addFeedFileInput || !el.addFeedSelectedLabel) return;
+    if (el.addFeedFileInput.files && el.addFeedFileInput.files.length > 0) {
+      const f = el.addFeedFileInput.files[0];
+      el.addFeedSelectedLabel.innerHTML = `<strong>Selected:</strong> ${escapeHtml(f.name)} (${(f.size / (1024 * 1024)).toFixed(2)} MB)`;
+      el.addFeedSelectedLabel.classList.remove("hidden");
+      if (el.addFeedCameraId && !el.addFeedCameraId.dataset.edited) {
+        el.addFeedCameraId.value = suggestCameraId(f.name, (state.mediaAssets ? state.mediaAssets.length : 0));
+      }
+    } else {
+      el.addFeedSelectedLabel.classList.add("hidden");
+    }
+  }
+
+  if (el.addFeedFileInput) {
+    el.addFeedFileInput.addEventListener("change", updateAddFeedFileLabel);
+  }
+
+  if (el.addFeedCameraId) {
+    el.addFeedCameraId.addEventListener("input", () => {
+      el.addFeedCameraId.dataset.edited = "true";
+    });
+  }
+
+  if (el.addFeedForm) {
+    el.addFeedForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const invId = state.activeInvestigationId;
+      if (!invId) {
+        showToast("No active investigation selected.", "error");
+        return;
+      }
+
+      if (!el.addFeedFileInput.files || el.addFeedFileInput.files.length === 0) {
+        showToast("Please choose a video footage file.", "error");
+        return;
+      }
+
+      const file = el.addFeedFileInput.files[0];
+      const camId = el.addFeedCameraId.value.trim() || "cam-extra";
+      const camName = el.addFeedCameraName ? el.addFeedCameraName.value.trim() : "";
+
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("camera_id", camId);
+      if (camName) formData.append("camera_name", camName);
+      formData.append("sample_interval_seconds", "2.0");
+      formData.append("max_frames", "30");
+
+      el.submitAddFeedBtn.disabled = true;
+      if (el.addFeedSpinner) el.addFeedSpinner.classList.remove("hidden");
+      showToast(`Ingesting feed ${camId}...`, "info");
+
+      try {
+        const res = await fetch(`/api/v1/investigations/${invId}/media`, {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail || "Failed to add feed");
+        }
+
+        const data = await res.json();
+        showToast(`Feed ${camId} ingested successfully! (${data.frame_count} frames extracted)`, "success");
+        el.addFeedModal.classList.add("hidden");
+        el.addFeedForm.reset();
+        if (el.addFeedSelectedLabel) el.addFeedSelectedLabel.classList.add("hidden");
+        delete el.addFeedCameraId.dataset.edited;
+
+        await refreshActiveCase();
+        if (data.media_asset_id) {
+          switchCameraFeed(data.media_asset_id, false);
+        }
+      } catch (err) {
+        showToast(err.message, "error");
+      } finally {
+        el.submitAddFeedBtn.disabled = false;
+        if (el.addFeedSpinner) el.addFeedSpinner.classList.add("hidden");
+      }
+    });
+  }
 
   // Demo Case Buttons
   el.loadDemoBtn.addEventListener("click", loadDemoCase);
@@ -1260,7 +1754,6 @@
   el.dismissHotkeysBtn.addEventListener("click", () => el.hotkeysModal.classList.add("hidden"));
 
   document.addEventListener("keydown", (e) => {
-    // Avoid interfering with form input fields
     if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
       if (e.key === "Escape") document.activeElement.blur();
       return;

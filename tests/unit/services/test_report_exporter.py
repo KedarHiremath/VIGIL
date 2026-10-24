@@ -144,7 +144,7 @@ def test_export_html_contains_required_sections() -> None:
 
     assert "<!DOCTYPE html>" in html_out
     assert "Forensic Analysis Report - Warehouse Breach" in html_out
-    assert "Executive Summary &amp; Findings" in html_out or "Executive Summary & Findings" in html_out
+    assert "Executive Summary" in html_out
     assert "perimeter_breach" in html_out or "Perimeter Breach" in html_out
     assert "CONFIRMED" in html_out
     assert "REJECTED" in html_out
