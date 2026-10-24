@@ -235,3 +235,62 @@ def test_export_pdf_generates_valid_pdf_document() -> None:
     assert isinstance(pdf_bytes, bytes)
     assert len(pdf_bytes) > 1000
     assert pdf_bytes.startswith(b"%PDF-")
+
+def test_export_pdf_with_large_multipage_markdown_summary() -> None:
+    now = datetime(2026, 10, 20, 15, 0, tzinfo=UTC)
+    inv = Investigation(
+        investigation_id="inv-pdf-large",
+        title="Multi-page PDF Export Case",
+        objective="Verify multi-page markdown summary renders without LayoutError",
+        scope_description="All Feeds",
+        media_asset_ids=["media-01"],
+    )
+
+    # Construct a long structured summary matching LLM output (tallest row > 700 points)
+    summary_parts = [
+        "### 1. Objective Finding & Direct Answer",
+        "- **Primary finding:** Comprehensive multi-modal forensic evaluation confirmed unauthorized access.",
+        "- **Direct Answer:** Subject breached perimeter fence at 00:14:02.",
+        "### 2. Multi-Modal Timeline & Chronological Sequence",
+    ]
+    for i in range(40):
+        summary_parts.append(
+            f"- **Timestamp [{i*2}.0s]:** Detection of physical movement across camera CAM-{i%3 + 1}. "
+            f"Confidence score evaluated at 0.9{i%10}. Acoustic Demux corroborates transient waveform."
+        )
+    summary_parts.extend([
+        "### 3. Evidentiary Confidence & Quality Assessment",
+        "The evidentiary quality rating is designated HIGH across visual and audio spectrums.",
+        "### 4. Investigative Conclusion & Next Steps",
+        "Case closed and deliverables exported.",
+    ])
+    large_summary = "\n".join(summary_parts)
+
+    report = Report(
+        report_id="rep-pdf-large",
+        investigation_id="inv-pdf-large",
+        title="Forensic Investigation Comprehensive Report",
+        summary=large_summary,
+        generated_by="vigil-reporter",
+        version=1,
+        status="finalized",
+        finalized_by="lead-inspector",
+        finalized_at=now,
+    )
+
+    pdf_bytes = ReportExporter.export_pdf(
+        investigation=inv,
+        report=report,
+        events=[],
+        observations=[],
+        assessments=[],
+        coverages=[],
+        artifacts=[],
+        audit_logs=[],
+        media_assets=[],
+    )
+
+    assert isinstance(pdf_bytes, bytes)
+    assert len(pdf_bytes) > 2000
+    assert pdf_bytes.startswith(b"%PDF-")
+

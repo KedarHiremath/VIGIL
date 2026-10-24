@@ -8,10 +8,82 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>">
 </head>
 <body>
+
+  <!-- =====================================================================
+       LANDING PAGE — shown on fresh load, hidden when workspace is entered
+  ====================================================================== -->
+  <div id="landingPage" class="landing-page">
+    <!-- Decorative corner brackets -->
+    <div class="landing-bracket landing-bracket-tl"></div>
+    <div class="landing-bracket landing-bracket-tr"></div>
+    <div class="landing-bracket landing-bracket-bl"></div>
+    <div class="landing-bracket landing-bracket-br"></div>
+    <!-- Animated scan line -->
+    <div class="landing-scanline"></div>
+    <!-- Grid overlay -->
+    <div class="landing-grid"></div>
+
+    <div class="landing-content">
+      <!-- Pulse ring behind wordmark -->
+      <div class="landing-pulse-ring"></div>
+      <div class="landing-pulse-ring landing-pulse-ring-2"></div>
+
+      <!-- Shield icon -->
+      <div class="landing-shield">
+        <svg viewBox="0 0 60 70" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M30 2L4 14v20c0 16 11 30 26 34 15-4 26-18 26-34V14L30 2z" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/>
+          <path d="M20 35l7 7 13-14" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <!-- Wordmark -->
+      <div class="landing-wordmark" aria-label="VIGIL">
+        <span class="landing-letter" style="--i:0">V</span><span class="landing-letter" style="--i:1">I</span><span class="landing-letter" style="--i:2">G</span><span class="landing-letter" style="--i:3">I</span><span class="landing-letter" style="--i:4">L</span>
+      </div>
+
+      <div class="landing-tagline">AUTONOMOUS FORENSIC VIDEO INTELLIGENCE</div>
+
+      <p class="landing-desc">
+        Multi-agent AI investigation platform for surveillance analysis,<br>
+        incident detection, and forensic evidence chain-of-custody.
+      </p>
+
+      <!-- Status indicators row -->
+      <div class="landing-status-row">
+        <div class="landing-status-dot"></div>
+        <span class="landing-status-text">SYSTEM READY</span>
+        <span class="landing-status-sep">&bull;</span>
+        <span class="landing-status-text">FORENSIC GRADE</span>
+        <span class="landing-status-sep">&bull;</span>
+        <span class="landing-status-text">MULTI-AGENT PIPELINE</span>
+      </div>
+
+      <!-- CTA Buttons -->
+      <div class="landing-actions">
+        <button id="enterWorkspaceBtn" class="landing-btn-primary">
+          <span class="landing-btn-icon">&#x25B6;</span>
+          Enter Forensic Workspace
+        </button>
+        <button id="landingDemoBtn" class="landing-btn-secondary">
+          <span>&#x2728;</span> Load Demo Case
+        </button>
+      </div>
+
+      <div class="landing-footer-note">
+        Press <kbd>Enter</kbd> to open workspace &bull; Press <kbd>D</kbd> to load demo case
+      </div>
+    </div>
+  </div>
+
+  <!-- =====================================================================
+       DASHBOARD APPLICATION — hidden until user enters workspace
+  ====================================================================== -->
+  <div id="dashboardApp" class="dashboard-app hidden">
+
   <!-- Top Navigation Header -->
   <header class="navbar">
     <div class="nav-left">
-      <div class="brand" title="VIGIL Autonomous Video-Forensics System">
+      <div class="brand" id="brandLogoBtn" title="Return to VIGIL home screen">
         <div class="brand-radar"></div>
         <span class="brand-name">VIGIL</span>
         <span class="brand-sub">FORENSIC SUITE</span>
@@ -88,7 +160,7 @@
         <div class="agent-chip" id="chip-temporal" title="Correlates multi-modal timeline events">
           <span class="agent-chip-dot"></span> Temporal
         </div>
-        <div class="agent-chip" id="chip-verifier" title="Assesses evidence uncertainty & coverage">
+        <div class="agent-chip" id="chip-verifier" title="Assesses evidence uncertainty &amp; coverage">
           <span class="agent-chip-dot"></span> Verifier
         </div>
         <div class="agent-chip" id="chip-reporter" title="Synthesizes structured forensic reports">
@@ -104,7 +176,7 @@
         </div>
         <div class="metric-item">
           <span class="metric-val" id="metricObs">0</span>
-          <span class="metric-lbl">OBSERVATIONS</span>
+          <span class="metric-lbl">OBS</span>
         </div>
         <div class="metric-item">
           <span class="metric-val" id="metricEvents">0</span>
@@ -118,7 +190,7 @@
 
       <!-- Telemetry Stream Feed -->
       <div class="telemetry-feed" id="telemetryFeed">
-        <div class="empty-state">Select an active investigation, ingest footage, or click "Demo Case" to monitor live forensic agents.</div>
+        <div class="empty-state">Select an active investigation, ingest footage, or click &ldquo;Demo Case&rdquo; to monitor live forensic agents.</div>
       </div>
     </aside>
 
@@ -205,21 +277,21 @@
       <!-- Incident Subclips Gallery -->
       <div id="clipsGalleryView" class="clips-gallery hidden">
         <div class="gallery-empty" id="clipsEmptyNotice">
-          No incident sub-clips sliced yet. Click "&#x2702; Cut Clip" on any event or quick action to generate reviewable clips.
+          No incident sub-clips sliced yet. Click &ldquo;&#x2702; Cut Clip&rdquo; on any event or quick action to generate reviewable clips.
         </div>
         <div class="clips-grid" id="clipsGrid"></div>
       </div>
     </section>
 
-    <!-- Right Column: Interactive Human Review Station (Phase 5) -->
+    <!-- Right Column: Interactive Human Review Station -->
     <aside class="panel review-panel">
       <div class="panel-header">
         <div class="panel-title">
           <span class="panel-icon">&#x2696;&#xFE0F;</span> HUMAN REVIEW STATION
         </div>
         <div class="filter-pills">
-          <button class="filter-pill active" data-filter="all">All (<span id="countAll">0</span>)</button>
-          <button class="filter-pill" data-filter="proposed">Proposed (<span id="countProposed">0</span>)</button>
+          <button class="filter-pill" data-filter="all">All (<span id="countAll">0</span>)</button>
+          <button class="filter-pill active" data-filter="proposed">Pending (<span id="countProposed">0</span>)</button>
           <button class="filter-pill" data-filter="confirmed">Confirmed (<span id="countConfirmed">0</span>)</button>
           <button class="filter-pill" data-filter="rejected">Rejected (<span id="countRejected">0</span>)</button>
         </div>
@@ -357,7 +429,6 @@
         <button class="modal-close" id="closeNewInvModal">&times;</button>
       </div>
       <form id="newInvForm" class="modal-body">
-        <!-- Hidden file input for multi-file selection -->
         <input type="file" id="videoFileInput" accept="video/*,.mp4,.mkv,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts" class="file-input-hidden" multiple>
 
         <div class="drop-zone" id="dropZone">
@@ -378,21 +449,18 @@
           <div class="drop-hint">&#x2139;&#xFE0F; Hold <kbd>Ctrl</kbd> or <kbd>Shift</kbd> in file dialog to select multiple video files at once</div>
         </div>
 
-        <!-- Selected Feeds Ingestion Queue -->
         <div id="selectedFeedsQueue" class="selected-feeds-queue hidden">
           <div class="queue-header">
             <span class="queue-title">&#x1F3AC; Premise Surveillance Feeds (<span id="selectedFeedCount">0</span> selected)</span>
             <span class="queue-note">Feeds will be ingested sequentially &amp; cross-correlated under 1 report</span>
           </div>
-          <div id="selectedFeedsList" class="selected-feeds-list">
-            <!-- Dynamically populated rows -->
-          </div>
+          <div id="selectedFeedsList" class="selected-feeds-list"></div>
         </div>
 
         <div class="form-grid">
           <div class="form-group">
             <label for="invTitleInput">Case / Investigation Title</label>
-            <input type="text" id="invTitleInput" placeholder="e.g. Premise Breach: South Perimeter & Courtyard">
+            <input type="text" id="invTitleInput" placeholder="e.g. Premise Breach: South Perimeter &amp; Courtyard">
           </div>
           <div class="form-group">
             <label for="invCameraInput">Camera ID(s) (comma-separated summary)</label>
@@ -433,7 +501,7 @@
     </div>
   </div>
 
-  <!-- Modal 1b: Add Additional Camera Feed to Active Case -->
+  <!-- Modal 1b: Add Additional Camera Feed -->
   <div id="addFeedModal" class="modal-backdrop hidden">
     <div class="modal">
       <div class="modal-header">
@@ -453,7 +521,6 @@
           </div>
           <div id="addFeedSelectedLabel" class="selected-file-label hidden" style="margin-top:6px;"></div>
         </div>
-
         <div class="form-grid">
           <div class="form-group">
             <label for="addFeedCameraId">Camera ID *</label>
@@ -464,7 +531,6 @@
             <input type="text" id="addFeedCameraName" placeholder="e.g. South Perimeter Courtyard">
           </div>
         </div>
-
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" id="cancelAddFeedBtn">Cancel</button>
           <button type="submit" class="btn btn-primary" id="submitAddFeedBtn">
@@ -475,7 +541,7 @@
     </div>
   </div>
 
-  <!-- Modal 2: Human Review & Edit Event (Phase 5) -->
+  <!-- Modal 2: Human Review & Edit Event -->
   <div id="reviewModal" class="modal-backdrop hidden">
     <div class="modal">
       <div class="modal-header">
@@ -484,7 +550,6 @@
       </div>
       <form id="reviewForm" class="modal-body">
         <input type="hidden" id="revEventId">
-        
         <div class="form-group">
           <label>Decision Status</label>
           <div class="radio-group">
@@ -499,7 +564,6 @@
             </label>
           </div>
         </div>
-
         <div class="form-grid">
           <div class="form-group">
             <label for="revReviewerInput">Investigator Badge / ID *</label>
@@ -510,7 +574,6 @@
             <input type="text" id="revCategoryInput" placeholder="e.g. perimeter_breach">
           </div>
         </div>
-
         <div class="form-grid">
           <div class="form-group">
             <label for="revStartSec">Start Offset (seconds)</label>
@@ -521,17 +584,14 @@
             <input type="number" id="revEndSec" step="0.1" min="0">
           </div>
         </div>
-
         <div class="form-group">
           <label for="revDescriptionInput">Event Description</label>
           <textarea id="revDescriptionInput" rows="2" placeholder="Describe verified activity..."></textarea>
         </div>
-
         <div class="form-group">
           <label for="revNotesInput">Forensic Rationale / Notes</label>
           <textarea id="revNotesInput" rows="2" placeholder="Record corroborating evidence, facial match, or dismissal justification..."></textarea>
         </div>
-
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" id="cancelReviewBtn">Cancel</button>
           <button type="submit" class="btn btn-primary" id="saveReviewBtn">Save Decision &amp; Audit Log</button>
@@ -558,7 +618,7 @@
         </div>
         <div class="form-group">
           <label for="finNotesInput">Case Sign-Off Notes / Chain of Custody Remarks</label>
-          <textarea id="finNotesInput" rows="3" placeholder="Case concluded with verified evidence across surveillance feeds. Playable video sub-clips sliced for all confirmed events and embedded in final report."></textarea>
+          <textarea id="finNotesInput" rows="3" placeholder="Case concluded with verified evidence across surveillance feeds."></textarea>
         </div>
         <div class="form-group">
           <label class="checkbox-label">
@@ -584,11 +644,7 @@
       <div class="modal-body">
         <table class="forensic-table hotkeys-table">
           <thead>
-            <tr>
-              <th>Key</th>
-              <th>Action</th>
-              <th>Context</th>
-            </tr>
+            <tr><th>Key</th><th>Action</th><th>Context</th></tr>
           </thead>
           <tbody>
             <tr><td><kbd>Space</kbd></td><td>Play / Pause footage</td><td>Video Player</td></tr>
@@ -614,6 +670,8 @@
   <div id="toastContainer" class="toast-container"></div>
 
   <!-- Application Script -->
-  <script src="/ui/app.js?v=2.2"></script>
+  <script src="/ui/app.js?v=3.0"></script>
+
+  </div><!-- /#dashboardApp -->
 </body>
 </html>

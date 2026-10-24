@@ -1,7 +1,12 @@
 /**
  * VIGIL Video Forensics Mission Control - Interactive Application Logic
  * Full autonomous multi-agent forensic suite frontend
- * Enhanced with Multi-Video Premise Correlation & Cross-Camera Timeline Switching
+ * Enhanced with:
+ * - Premium Animated Landing Page Routing
+ * - Session State Isolation & Cleanup (No stale footage across sessions)
+ * - Readable Live Event Feed in Agent Mission Control
+ * - Real-time Human Review Station (Confirmed/rejected events leave pending queue)
+ * - Multi-Video Premise Correlation & Cross-Camera Timeline Switching
  */
 
 (function () {
@@ -19,16 +24,26 @@
     auditLogs: [],
     mediaAssets: [],
     ws: null,
-    activeFilter: "all",
+    activeFilter: "proposed", // Default to pending review queue
     eventSearchQuery: "",
     selectedFiles: [],
     selectedFeeds: [],
     currentMediaAssetId: null,
     currentMediaSource: "video", // "video" or "artifact"
+    seenTelemetryKeys: new Set(),
+    createdObjectUrls: [],
   };
 
   // DOM Elements
   const el = {
+    // Top Views
+    landingPage: document.getElementById("landingPage"),
+    dashboardApp: document.getElementById("dashboardApp"),
+    enterWorkspaceBtn: document.getElementById("enterWorkspaceBtn"),
+    landingDemoBtn: document.getElementById("landingDemoBtn"),
+    brandLogoBtn: document.getElementById("brandLogoBtn"),
+
+    // Navbar
     invSelect: document.getElementById("invSelect"),
     refreshInvBtn: document.getElementById("refreshInvBtn"),
     loadDemoBtn: document.getElementById("loadDemoBtn"),
@@ -45,6 +60,8 @@
     exportHtmlBtn: document.getElementById("exportHtmlBtn"),
     exportMdBtn: document.getElementById("exportMdBtn"),
     finalizeReportBtn: document.getElementById("finalizeReportBtn"),
+
+    // Telemetry Mission Control
     clearTelemetryBtn: document.getElementById("clearTelemetryBtn"),
     telemetryFeed: document.getElementById("telemetryFeed"),
     telemetryCount: document.getElementById("telemetryCount"),
@@ -52,8 +69,11 @@
     metricObs: document.getElementById("metricObs"),
     metricEvents: document.getElementById("metricEvents"),
     metricClips: document.getElementById("metricClips"),
+
+    // Video Player & Controls
     mainVideoPlayer: document.getElementById("mainVideoPlayer"),
     videoPlaceholder: document.getElementById("videoPlaceholder"),
+    videoContainer: document.getElementById("videoContainer"),
     hudCameraId: document.getElementById("hudCameraId"),
     hudFrameCounter: document.getElementById("hudFrameCounter"),
     currentTimeDisplay: document.getElementById("currentTimeDisplay"),
@@ -68,23 +88,31 @@
     sourceMetaText: document.getElementById("sourceMetaText"),
     cameraFeedSelect: document.getElementById("cameraFeedSelect"),
     cameraFeedPickerWrap: document.getElementById("cameraFeedPickerWrap"),
+
+    // Timeline
     timelineTrack: document.getElementById("timelineTrack"),
     timelineTicks: document.getElementById("timelineTicks"),
     timelineProgress: document.getElementById("timelineProgress"),
     timelineMarkersContainer: document.getElementById("timelineMarkersContainer"),
     timelineHoverTooltip: document.getElementById("timelineHoverTooltip"),
     timelineSpanLabel: document.getElementById("timelineSpanLabel"),
+
+    // Media Tabs & Clips
     mediaTabs: document.getElementById("mediaTabs"),
     clipsGalleryView: document.getElementById("clipsGalleryView"),
     clipsGrid: document.getElementById("clipsGrid"),
     clipsCount: document.getElementById("clipsCount"),
     clipsEmptyNotice: document.getElementById("clipsEmptyNotice"),
+
+    // Human Review Station
     eventSearchInput: document.getElementById("eventSearchInput"),
     eventsList: document.getElementById("eventsList"),
     countAll: document.getElementById("countAll"),
     countProposed: document.getElementById("countProposed"),
     countConfirmed: document.getElementById("countConfirmed"),
     countRejected: document.getElementById("countRejected"),
+
+    // Bottom Drawer
     bottomDrawer: document.getElementById("bottomDrawer"),
     drawerToggle: document.getElementById("drawerToggle"),
     drawerToggleIcon: document.getElementById("drawerToggleIcon"),
@@ -97,6 +125,7 @@
     auditTable: document.getElementById("auditTable").querySelector("tbody"),
     auditCount: document.getElementById("auditCount"),
     reportPreviewBox: document.getElementById("reportPreviewBox"),
+
     // Modals
     newInvModal: document.getElementById("newInvModal"),
     closeNewInvModal: document.getElementById("closeNewInvModal"),
@@ -116,9 +145,9 @@
     invSampleInterval: document.getElementById("invSampleInterval"),
     invMaxFrames: document.getElementById("invMaxFrames"),
     invExtractAudio: document.getElementById("invExtractAudio"),
-    selectedFileLabel: document.getElementById("selectedFileLabel"),
     uploadSpinner: document.getElementById("uploadSpinner"),
     startInvBtn: document.getElementById("startInvBtn"),
+
     // Add feed modal
     openAddFeedModalBtn: document.getElementById("openAddFeedModalBtn"),
     addFeedModal: document.getElementById("addFeedModal"),
@@ -133,6 +162,8 @@
     addFeedCameraName: document.getElementById("addFeedCameraName"),
     submitAddFeedBtn: document.getElementById("submitAddFeedBtn"),
     addFeedSpinner: document.getElementById("addFeedSpinner"),
+
+    // Review Modal
     reviewModal: document.getElementById("reviewModal"),
     closeReviewModal: document.getElementById("closeReviewModal"),
     cancelReviewBtn: document.getElementById("cancelReviewBtn"),
@@ -144,10 +175,16 @@
     revEndSec: document.getElementById("revEndSec"),
     revDescriptionInput: document.getElementById("revDescriptionInput"),
     revNotesInput: document.getElementById("revNotesInput"),
+    saveReviewBtn: document.getElementById("saveReviewBtn"),
+
+    // Finalize Modal
     finalizeModal: document.getElementById("finalizeModal"),
     closeFinalizeModal: document.getElementById("closeFinalizeModal"),
     cancelFinalizeBtn: document.getElementById("cancelFinalizeBtn"),
     finalizeForm: document.getElementById("finalizeForm"),
+    submitFinalizeBtn: document.getElementById("submitFinalizeBtn"),
+
+    // Hotkeys Modal
     hotkeysModal: document.getElementById("hotkeysModal"),
     closeHotkeysModal: document.getElementById("closeHotkeysModal"),
     dismissHotkeysBtn: document.getElementById("dismissHotkeysBtn"),
@@ -160,8 +197,8 @@
   function showToast(msg, type = "info") {
     const toast = document.createElement("div");
     toast.className = `toast ${type}`;
-    const icon = type === "success" ? "&#x2705;" : (type === "error" ? "&#x26A0;&#xFE0F;" : "&#x2139;&#xFE0F;");
-    toast.innerHTML = `<span>${icon}</span> <span>${msg}</span>`;
+    const icon = type === "success" ? "\u2705" : (type === "error" ? "\u26A0\uFE0F" : "\u2139\uFE0F");
+    toast.innerHTML = `<span>${icon}</span> <span>${escapeHtml(msg)}</span>`;
     el.toastContainer.appendChild(toast);
     setTimeout(() => {
       toast.style.opacity = "0";
@@ -175,6 +212,16 @@
     const mins = Math.floor(seconds / 60);
     const secs = (seconds % 60).toFixed(2);
     return `${String(mins).padStart(2, "0")}:${String(secs).padStart(5, "0")}`;
+  }
+
+  function escapeHtml(str) {
+    if (!str) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
   }
 
   // -------------------------------------------------------------------------
@@ -196,9 +243,156 @@
   }
 
   // -------------------------------------------------------------------------
-  // Investigation Lifecycle Management
+  // View Routing: Landing Page vs. Forensic Workspace (Requirement C)
   // -------------------------------------------------------------------------
-  async function loadInvestigations(targetInvId = null) {
+  function showLandingPage() {
+    if (el.landingPage) el.landingPage.classList.remove("hidden");
+    if (el.dashboardApp) el.dashboardApp.classList.add("hidden");
+  }
+
+  function showDashboard() {
+    if (el.landingPage) el.landingPage.classList.add("hidden");
+    if (el.dashboardApp) el.dashboardApp.classList.remove("hidden");
+  }
+
+  function navigateToWorkspace(invId = null) {
+    showDashboard();
+    if (invId) {
+      window.location.hash = `case=${encodeURIComponent(invId)}`;
+      setActiveInvestigation(invId);
+    } else if (state.activeInvestigationId) {
+      window.location.hash = `case=${encodeURIComponent(state.activeInvestigationId)}`;
+    } else {
+      window.location.hash = "workspace";
+    }
+  }
+
+  if (el.enterWorkspaceBtn) {
+    el.enterWorkspaceBtn.addEventListener("click", () => {
+      navigateToWorkspace(state.activeInvestigationId || null);
+    });
+  }
+
+  if (el.landingDemoBtn) {
+    el.landingDemoBtn.addEventListener("click", () => {
+      showDashboard();
+      window.location.hash = "workspace";
+      loadDemoCase();
+    });
+  }
+
+  if (el.brandLogoBtn) {
+    el.brandLogoBtn.addEventListener("click", () => {
+      showLandingPage();
+      window.location.hash = "landing";
+    });
+  }
+
+  function handleRoute() {
+    const hash = window.location.hash;
+    const urlParams = new URLSearchParams(window.location.search);
+    const invFromQuery = urlParams.get("inv") || urlParams.get("case");
+
+    if (hash.startsWith("#case=")) {
+      const caseId = decodeURIComponent(hash.substring(6));
+      showDashboard();
+      loadInvestigations(caseId);
+    } else if (invFromQuery) {
+      showDashboard();
+      loadInvestigations(invFromQuery);
+    } else if (hash === "#workspace" || hash === "#dashboard") {
+      showDashboard();
+      loadInvestigations(state.activeInvestigationId || null);
+    } else {
+      // Default initial session: Show landing page!
+      showLandingPage();
+      // Preload cases list so dropdown is ready when entering workspace,
+      // but do NOT auto-select the first investigation to avoid stale session data!
+      loadInvestigations(null, false);
+    }
+  }
+
+  window.addEventListener("popstate", handleRoute);
+
+  // -------------------------------------------------------------------------
+  // Investigation Lifecycle & Session State Isolation (Requirement B)
+  // -------------------------------------------------------------------------
+  function resetWorkspace(clearDropdown = false) {
+    // 1. Revoke any browser-created object URLs
+    if (state.createdObjectUrls && state.createdObjectUrls.length > 0) {
+      state.createdObjectUrls.forEach(url => {
+        try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+      });
+      state.createdObjectUrls = [];
+    }
+
+    // 2. Disconnect WebSocket
+    if (state.ws) {
+      state.ws.onclose = null;
+      state.ws.close();
+      state.ws = null;
+    }
+    el.wsLabel.textContent = "WS: DISCONNECTED";
+    el.wsIndicator.className = "ws-pill ws-disconnected";
+
+    // 3. Reset Video Player & HUD
+    try {
+      el.mainVideoPlayer.pause();
+      el.mainVideoPlayer.removeAttribute("src");
+      el.mainVideoPlayer.load();
+    } catch (e) { /* ignore */ }
+
+    el.videoPlaceholder.classList.remove("hidden");
+    el.hudCameraId.textContent = "CAM: -";
+    el.hudFrameCounter.textContent = "00:00.00";
+    el.currentTimeDisplay.textContent = "00:00.00";
+    el.durationDisplay.textContent = "00:00.00";
+    el.timelineProgress.style.width = "0%";
+    el.timelineSpanLabel.textContent = "0s \u2013 0s";
+    el.timelineMarkersContainer.innerHTML = "";
+    el.sourceMetaText.textContent = "SHA-256: -";
+
+    // 4. Reset Lists & Tables
+    state.events = [];
+    state.observations = [];
+    state.artifacts = [];
+    state.assessments = [];
+    state.auditLogs = [];
+    state.mediaAssets = [];
+    state.seenTelemetryKeys.clear();
+
+    renderEvents();
+    renderObservations();
+    renderAssessments();
+    renderAuditLogs();
+    renderArtifacts();
+
+    // Reset report preview
+    el.reportPreviewBox.innerHTML = `<div class="gallery-empty">Select or load an investigation to view findings.</div>`;
+
+    // Reset metrics HUD
+    el.metricFrames.textContent = "0";
+    el.metricObs.textContent = "0";
+    el.metricEvents.textContent = "0";
+    el.metricClips.textContent = "0";
+
+    // Reset telemetry log
+    el.telemetryFeed.innerHTML = `<div class="empty-state">Select an active investigation, ingest footage, or click "Demo Case" to monitor live forensic agents.</div>`;
+    el.telemetryCount.textContent = "0 events";
+
+    // Reset camera feed picker
+    if (el.cameraFeedSelect) {
+      el.cameraFeedSelect.innerHTML = `<option value="primary">Primary Camera</option>`;
+    }
+
+    if (clearDropdown) {
+      el.invSelect.value = "";
+      updateCaseStatus("NO CASE LOADED");
+      state.activeInvestigationId = null;
+    }
+  }
+
+  async function loadInvestigations(targetInvId = null, autoSelect = true) {
     try {
       const items = await apiFetch("/api/v1/investigations");
       state.investigations = items;
@@ -207,9 +401,15 @@
       if (items.length === 0) {
         el.invSelect.innerHTML = `<option value="" disabled selected>No cases registered</option>`;
         updateCaseStatus("NO CASES");
-        el.videoPlaceholder.classList.remove("hidden");
+        resetWorkspace(true);
         return;
       }
+
+      // Default option when no case is selected
+      const defaultOpt = document.createElement("option");
+      defaultOpt.value = "";
+      defaultOpt.textContent = "-- Select an Investigation --";
+      el.invSelect.appendChild(defaultOpt);
 
       items.forEach((inv) => {
         const opt = document.createElement("option");
@@ -218,22 +418,46 @@
         el.invSelect.appendChild(opt);
       });
 
-      const toSelect = targetInvId
-        || (state.activeInvestigationId && items.some(i => i.investigation_id === state.activeInvestigationId)
-            ? state.activeInvestigationId
-            : items[0].investigation_id);
-
-      setActiveInvestigation(toSelect);
+      // If a specific target ID was requested or already active
+      if (targetInvId && items.some(i => i.investigation_id === targetInvId)) {
+        setActiveInvestigation(targetInvId);
+      } else if (state.activeInvestigationId && items.some(i => i.investigation_id === state.activeInvestigationId)) {
+        setActiveInvestigation(state.activeInvestigationId);
+      } else if (autoSelect && window.location.hash.startsWith("#case=")) {
+        const idFromHash = decodeURIComponent(window.location.hash.substring(6));
+        if (items.some(i => i.investigation_id === idFromHash)) {
+          setActiveInvestigation(idFromHash);
+        } else {
+          resetWorkspace(true);
+        }
+      } else {
+        // Fresh session or no explicit selection: DO NOT auto-select past footage!
+        resetWorkspace(true);
+      }
     } catch (err) {
       console.error("Could not load investigations:", err);
     }
   }
 
   function setActiveInvestigation(invId) {
+    if (!invId) {
+      resetWorkspace(true);
+      return;
+    }
+
+    // Reset state before loading new investigation
+    resetWorkspace(false);
+
     state.activeInvestigationId = invId;
     el.invSelect.value = invId;
     state.currentMediaSource = "video";
     state.currentMediaAssetId = null;
+
+    // Synchronize URL hash without full reload
+    if (window.location.hash !== `#case=${encodeURIComponent(invId)}`) {
+      window.history.replaceState(null, "", `#case=${encodeURIComponent(invId)}`);
+    }
+
     connectWebSocket(invId);
     refreshActiveCase();
   }
@@ -244,8 +468,8 @@
 
     try {
       const res = await apiFetch("/api/v1/investigations/demo", { method: "POST" });
-      showToast("Premise multi-camera demo case loaded with synchronized feeds!", "success");
-      await loadInvestigations(res.investigation_id);
+      showToast("Multi-camera forensic demo case loaded with synchronized feeds!", "success");
+      await loadInvestigations(res.investigation_id, true);
     } catch (err) {
       showToast("Failed to load demo case: " + err.message, "error");
     } finally {
@@ -261,11 +485,13 @@
     try {
       // 1. Status
       const statusData = await apiFetch(`/api/v1/investigations/${invId}/status`);
+      if (state.activeInvestigationId !== invId) return; // Prevent race condition
       state.status = statusData;
       updateCaseStatus(statusData.status);
 
       // 2. Full investigation details
       const invData = await apiFetch(`/api/v1/investigations/${invId}`);
+      if (state.activeInvestigationId !== invId) return;
 
       // 3. Media assets (multi-video premise feeds)
       try {
@@ -277,9 +503,9 @@
       // Update camera feed selector dropdown
       updateCameraFeedSelector(invData);
 
-      // Immediately load and show the surveillance video feed
+      // Load primary footage or active camera feed
       if (state.currentMediaSource !== "artifact") {
-        if (state.currentMediaAssetId) {
+        if (state.currentMediaAssetId && state.mediaAssets.some(m => m.media_asset_id === state.currentMediaAssetId)) {
           switchCameraFeed(state.currentMediaAssetId, false);
         } else {
           loadPrimaryVideo();
@@ -288,8 +514,7 @@
 
       // 4. Events
       try {
-        const eventsData = await apiFetch(`/api/v1/investigations/${invId}/events`);
-        state.events = eventsData;
+        state.events = await apiFetch(`/api/v1/investigations/${invId}/events`);
         renderEvents();
         renderTimelineMarkers();
       } catch {
@@ -306,12 +531,11 @@
 
       // 6. Artifacts (frames, audio, clips)
       try {
-        const artifactsData = await apiFetch(`/api/v1/investigations/${invId}/artifacts`);
-        state.artifacts = artifactsData;
-        renderArtifacts();
+        state.artifacts = await apiFetch(`/api/v1/investigations/${invId}/artifacts`);
       } catch {
         state.artifacts = [];
       }
+      renderArtifacts();
 
       // 7. Evidence assessments
       try {
@@ -323,17 +547,16 @@
 
       // 8. Audit logs
       try {
-        const auditData = await apiFetch(`/api/v1/investigations/${invId}/audit`);
-        state.auditLogs = auditData;
-        renderAuditLogs();
+        state.auditLogs = await apiFetch(`/api/v1/investigations/${invId}/audit`);
       } catch {
         state.auditLogs = [];
       }
+      renderAuditLogs();
 
-      // 10. Report preview
+      // 9. Report preview
       loadReportPreview();
 
-      // 11. Update HUD metric counters
+      // 10. HUD metrics
       updateHudMetrics();
 
     } catch (err) {
@@ -355,7 +578,6 @@
         el.cameraFeedSelect.appendChild(opt);
       });
 
-      // Keep current selection if valid, or default to first
       if (!state.mediaAssets.some(m => m.media_asset_id === state.currentMediaAssetId)) {
         state.currentMediaAssetId = state.mediaAssets[0].media_asset_id;
       }
@@ -386,10 +608,276 @@
   }
 
   // -------------------------------------------------------------------------
+  // Agent Mission Control & Readable Live Event Feed (Requirement A)
+  // -------------------------------------------------------------------------
+  function interpretEvent(msg) {
+    const evtType = msg.event_type || "event";
+    const data = msg.data || {};
+    let category = "system";
+    let title = "System Notification";
+    let description = data.message || "";
+    let statusClass = "";
+
+    switch (evtType) {
+      case "subscription_acknowledged":
+        category = "system";
+        title = "Telemetry Link Established";
+        description = `Connected to live agent monitoring stream for case ${data.replayed_events ? `(${data.replayed_events} events synchronized)` : ""}`;
+        break;
+
+      case "connection":
+        category = "system";
+        title = "Mission Console Online";
+        description = data.message || "Forensic telemetry link opened.";
+        break;
+
+      case "investigation_created":
+        category = "planner";
+        title = "Investigation Initialized";
+        description = `Case "${data.title || data.investigation_id}" registered with ${data.media_count || 1} video feed(s). Preparing multi-modal pipeline.`;
+        statusClass = "success";
+        break;
+
+      case "media_added":
+        category = "visual";
+        title = "Footage Ingested";
+        description = `Feed ${data.camera_id ? data.camera_id.toUpperCase() : "camera"} ingested (${data.frame_count || 0} frames extracted).`;
+        break;
+
+      case "state_changed":
+        category = "system";
+        title = `Investigation State: ${data.status ? data.status.toUpperCase() : "UPDATED"}`;
+        description = `Forensic workflow state transitioned to ${data.status || "active"}.`;
+        if (data.status === "completed") statusClass = "success";
+        if (data.status === "failed") statusClass = "error";
+        break;
+
+      case "plan_created":
+        category = "planner";
+        title = "Investigation Plan Formulated";
+        description = `Planner Agent generated ${data.task_count || (data.tasks ? data.tasks.length : 0)} tactical forensic inspection tasks.`;
+        statusClass = "planner";
+        break;
+
+      case "task_started":
+        const tStartType = data.task_type || "";
+        if (tStartType === "frame_sampling") {
+          category = "visual";
+          title = "Frame Extraction Started";
+          description = "Extracting temporal image frames from source surveillance footage.";
+        } else if (tStartType === "visual_analysis") {
+          category = "visual";
+          title = "Visual Inspection Started";
+          description = "Vision model inspecting extracted frames for anomalies and suspicious entities.";
+        } else if (tStartType === "audio_transcription") {
+          category = "audio";
+          title = "Acoustic Demuxing & Transcription";
+          description = "Demuxing PCM audio track and analyzing acoustic event signatures.";
+        } else if (tStartType === "event_correlation") {
+          category = "temporal";
+          title = "Temporal Correlation Started";
+          description = "Correlating multi-camera observations across timestamps into candidate incidents.";
+        } else if (tStartType === "evidence_assessment") {
+          category = "verifier";
+          title = "Evidence Assessment Started";
+          description = "Forensic Verifier evaluating evidence credibility, support level, and uncertainty.";
+        } else if (tStartType === "coverage_evaluation") {
+          category = "verifier";
+          title = "Coverage Evaluation Started";
+          description = "Computing temporal and spatial coverage metrics across camera feeds.";
+        } else if (tStartType === "report_generation") {
+          category = "reporter";
+          title = "Report Synthesis Started";
+          description = "Synthesizing structured forensic deliverable report.";
+        } else {
+          category = "system";
+          title = `Task Started: ${tStartType.replace(/_/g, " ").toUpperCase()}`;
+          description = data.description || "Task execution initiated.";
+        }
+        break;
+
+      case "task_completed":
+        const tDoneType = data.task_type || "";
+        if (tDoneType === "frame_sampling") {
+          category = "visual";
+          title = "Frame Extraction Completed";
+          description = "Surveillance frames extracted, cataloged, and verified for SHA-256 integrity.";
+        } else if (tDoneType === "visual_analysis") {
+          category = "visual";
+          title = "Visual Analysis Completed";
+          description = "Vision model analysis finished across all extracted frames.";
+        } else if (tDoneType === "audio_transcription") {
+          category = "audio";
+          title = "Acoustic Analysis Completed";
+          description = "Acoustic transcription and sound transient detection finished.";
+        } else if (tDoneType === "event_correlation") {
+          category = "temporal";
+          title = "Temporal Correlation Completed";
+          description = "Incident candidates structured and synchronized on master timeline.";
+        } else if (tDoneType === "evidence_assessment") {
+          category = "verifier";
+          title = "Evidence Assessment Completed";
+          description = "Investigative rationales and credibility scores assigned to findings.";
+        } else if (tDoneType === "coverage_evaluation") {
+          category = "verifier";
+          title = "Coverage Verification Concluded";
+          description = "Evidence coverage assessment recorded in audit log.";
+        } else if (tDoneType === "report_generation") {
+          category = "reporter";
+          title = "Forensic Report Synthesized";
+          description = "Structured deliverable report drafted and ready for review.";
+        } else {
+          category = "system";
+          title = `Task Completed: ${tDoneType.replace(/_/g, " ").toUpperCase()}`;
+          description = "Agent operation finished successfully.";
+        }
+        statusClass = "success";
+        break;
+
+      case "observation_detected":
+        const obs = data.observation || {};
+        category = obs.modality === "audio" ? "audio" : "visual";
+        title = `Observation Logged [${obs.modality ? obs.modality.toUpperCase() : "DETECTION"}]`;
+        description = `${obs.observation_type ? obs.observation_type.replace(/_/g, " ").toUpperCase() : "Finding"}: ${cleanObservationDesc(obs.description).slice(0, 90)}`;
+        statusClass = category;
+        break;
+
+      case "event_correlated":
+        const evt = data.event || {};
+        category = "temporal";
+        title = `Incident Correlated: ${evt.event_type ? evt.event_type.replace(/_/g, " ").toUpperCase() : "INCIDENT"}`;
+        description = evt.description ? evt.description.slice(0, 110) : "Potential incident flagged for analyst review.";
+        statusClass = "temporal";
+        break;
+
+      case "coverage_updated":
+        category = "verifier";
+        title = "Coverage Metrics Updated";
+        description = "Surveillance camera timeline coverage and spatial visibility metrics updated.";
+        statusClass = "verifier";
+        break;
+
+      case "event_reviewed":
+        category = "system";
+        title = `Event Review: ${data.status ? data.status.toUpperCase() : "RECORDED"}`;
+        description = `Analyst ${data.reviewer || "Investigator"} submitted decision for Event #${data.event_id || ""}.`;
+        statusClass = data.status === "confirmed" ? "success" : (data.status === "rejected" ? "error" : "warn");
+        break;
+
+      case "event_edited":
+        category = "system";
+        title = `Event #${data.event_id || ""} Updated`;
+        description = "Event parameters, offsets, or notes modified by investigator.";
+        break;
+
+      case "report_finalized":
+        category = "reporter";
+        title = "Case Deliverable Finalized & Signed";
+        description = `Official report locked by ${data.finalized_by || "Lead Investigator"}. ${data.clip_count ? `${data.clip_count} H.264 video sub-clips sliced.` : ""}`;
+        statusClass = "success";
+        break;
+
+      case "investigation_completed":
+        category = "reporter";
+        title = "Investigation Concluded Successfully";
+        description = data.report_title ? `Case closed with report: "${data.report_title}".` : "All autonomous forensic agent tasks completed.";
+        statusClass = "success";
+        break;
+
+      case "task_failed":
+        category = "error";
+        title = `Task Failed: ${data.task_type ? data.task_type.replace(/_/g, " ").toUpperCase() : "Operation"}`;
+        description = data.error || "An error occurred during agent execution.";
+        statusClass = "error";
+        break;
+
+      case "investigation_error":
+      case "investigation_failed":
+        category = "error";
+        title = "Investigation Processing Error";
+        description = data.error || "Forensic pipeline encountered an unrecoverable issue.";
+        statusClass = "error";
+        break;
+
+      default:
+        category = "system";
+        title = evtType.replace(/_/g, " ").toUpperCase();
+        description = data.message || (typeof data === "string" ? data : JSON.stringify(data));
+        break;
+    }
+
+    return {
+      category,
+      title,
+      description,
+      statusClass,
+      technicalPayload: JSON.stringify(msg, null, 2),
+    };
+  }
+
+  function addTelemetryLog(msg) {
+    if (!el.telemetryFeed) return;
+
+    // Deduplication check
+    const dedupKey = `${msg.event_type || ""}|${msg.timestamp || ""}|${msg.data?.task_id || msg.data?.observation?.observation_id || msg.data?.event?.event_id || msg.data?.message || ""}`;
+    if (state.seenTelemetryKeys.has(dedupKey)) {
+      return;
+    }
+    state.seenTelemetryKeys.add(dedupKey);
+
+    // Remove empty state placeholder if present
+    if (el.telemetryFeed.querySelector(".empty-state")) {
+      el.telemetryFeed.innerHTML = "";
+    }
+
+    const interpreted = interpretEvent(msg);
+    const timeStr = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+
+    const item = document.createElement("div");
+    item.className = `telemetry-item ${interpreted.statusClass || interpreted.category}`;
+
+    item.innerHTML = `
+      <div class="telemetry-meta">
+        <span class="telemetry-badge badge-${interpreted.category}">${interpreted.category}</span>
+        <span class="telemetry-timestamp">${timeStr}</span>
+      </div>
+      <div class="telemetry-title">${escapeHtml(interpreted.title)}</div>
+      <div class="telemetry-body">${escapeHtml(interpreted.description)}</div>
+      <details class="telemetry-details">
+        <summary>Technical Payload</summary>
+        <pre>${escapeHtml(interpreted.technicalPayload)}</pre>
+      </details>
+    `;
+
+    // Sensible auto-scrolling: if user is already near bottom, auto-scroll; otherwise don't disrupt reading older events
+    const isNearBottom = el.telemetryFeed.scrollHeight - el.telemetryFeed.scrollTop - el.telemetryFeed.clientHeight < 60;
+
+    el.telemetryFeed.appendChild(item);
+
+    if (isNearBottom) {
+      el.telemetryFeed.scrollTop = el.telemetryFeed.scrollHeight;
+    }
+
+    // Keep DOM bounded to 150 items
+    if (el.telemetryFeed.children.length > 150) {
+      el.telemetryFeed.removeChild(el.telemetryFeed.firstChild);
+    }
+
+    el.telemetryCount.textContent = `${el.telemetryFeed.children.length} events`;
+  }
+
+  el.clearTelemetryBtn.addEventListener("click", () => {
+    state.seenTelemetryKeys.clear();
+    el.telemetryFeed.innerHTML = '<div class="empty-state">Log cleared. Real-time telemetry will appear as agents execute.</div>';
+    el.telemetryCount.textContent = "0 events";
+  });
+
+  // -------------------------------------------------------------------------
   // WebSocket Telemetry Connection
   // -------------------------------------------------------------------------
   function connectWebSocket(invId) {
     if (state.ws) {
+      state.ws.onclose = null;
       state.ws.close();
       state.ws = null;
     }
@@ -438,7 +926,7 @@
     if (msg.event_type === "pong") return;
 
     addTelemetryLog(msg);
-    activateAgentChip(msg.event_type);
+    activateAgentChip(msg);
 
     if (
       msg.event_type === "state_changed" ||
@@ -459,7 +947,7 @@
 
     if (evtType === "plan_created") {
       targetId = "chip-planner";
-    } else if (evtType === "task_started") {
+    } else if (evtType === "task_started" || evtType === "task_completed") {
       const taskType = data?.task_type || "";
       if (taskType === "audio_transcription") {
         targetId = "chip-audio";
@@ -475,11 +963,7 @@
         targetId = "chip-visual";
       }
     } else if (evtType === "observation_detected") {
-      if (data?.observation?.modality === "audio") {
-        targetId = "chip-audio";
-      } else {
-        targetId = "chip-visual";
-      }
+      targetId = (data?.observation?.modality === "audio") ? "chip-audio" : "chip-visual";
     } else if (evtType === "event_correlated") {
       targetId = "chip-temporal";
     } else if (evtType === "coverage_updated") {
@@ -496,41 +980,6 @@
       }
     }
   }
-
-  function addTelemetryLog(msg) {
-    if (el.telemetryFeed.querySelector(".empty-state")) {
-      el.telemetryFeed.innerHTML = "";
-    }
-
-    const item = document.createElement("div");
-    item.className = "telemetry-item";
-
-    const evtType = msg.event_type || "event";
-    if (evtType.includes("completed") || evtType.includes("confirmed")) item.classList.add("success");
-    if (evtType.includes("error") || evtType.includes("failed") || evtType.includes("rejected")) item.classList.add("error");
-
-    const timeStr = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
-    const details = msg.data ? (msg.data.message || msg.data.error || JSON.stringify(msg.data)) : "";
-
-    item.innerHTML = `
-      <div class="telemetry-meta">
-        <span class="telemetry-type">${evtType.replace(/_/g, " ")}</span>
-        <span>${timeStr}</span>
-      </div>
-      <div class="telemetry-body">${details}</div>
-    `;
-
-    el.telemetryFeed.insertBefore(item, el.telemetryFeed.firstChild);
-
-    const total = el.telemetryFeed.children.length;
-    el.telemetryCount.textContent = `${total} events`;
-    if (total > 80) el.telemetryFeed.removeChild(el.telemetryFeed.lastChild);
-  }
-
-  el.clearTelemetryBtn.addEventListener("click", () => {
-    el.telemetryFeed.innerHTML = '<div class="empty-state">Log cleared. Real-time telemetry will appear as agents execute.</div>';
-    el.telemetryCount.textContent = "0 events";
-  });
 
   // -------------------------------------------------------------------------
   // Video Player & Camera Feed Switching
@@ -594,7 +1043,6 @@
 
     el.videoPlaceholder.classList.add("hidden");
 
-    // Look up media asset details
     const ma = state.mediaAssets.find(m => m.media_asset_id === mediaAssetId);
     if (ma) {
       const camId = ma.camera_id ? ma.camera_id.toUpperCase() : "CAM";
@@ -646,7 +1094,7 @@
   el.mainVideoPlayer.addEventListener("loadedmetadata", () => {
     const dur = el.mainVideoPlayer.duration;
     el.durationDisplay.textContent = formatTime(dur);
-    el.timelineSpanLabel.textContent = `0s – ${dur.toFixed(1)}s`;
+    el.timelineSpanLabel.textContent = `0s \u2013 ${dur.toFixed(1)}s`;
     renderTimelineMarkers();
   });
 
@@ -695,7 +1143,6 @@
     }
   });
 
-  // Timeline hover tooltip
   el.timelineTrack.addEventListener("mousemove", (e) => {
     const rect = el.timelineTrack.getBoundingClientRect();
     const hoverX = e.clientX - rect.left;
@@ -712,7 +1159,6 @@
     el.timelineHoverTooltip.classList.add("hidden");
   });
 
-  // Quick Cut Clip from Playhead
   el.quickClipBtn.addEventListener("click", async () => {
     const curTime = el.mainVideoPlayer.currentTime;
     const invId = state.activeInvestigationId;
@@ -736,7 +1182,7 @@
   });
 
   // -------------------------------------------------------------------------
-  // Event Review Station & Interactive Markers (Phase 5)
+  // Human Review Station (Requirement D)
   // -------------------------------------------------------------------------
   function renderTimelineMarkers() {
     el.timelineMarkersContainer.innerHTML = "";
@@ -765,15 +1211,28 @@
 
   function renderEvents() {
     const search = state.eventSearchQuery.toLowerCase();
+
+    // Filter events based on active tab and search query
     const filtered = state.events.filter((e) => {
-      const matchesFilter = state.activeFilter === "all" || e.status === state.activeFilter;
+      let matchesFilter = false;
+      if (state.activeFilter === "all") {
+        matchesFilter = true;
+      } else if (state.activeFilter === "proposed") {
+        // Pending queue view: shows proposed or under_review only
+        matchesFilter = (e.status === "proposed" || e.status === "under_review");
+      } else {
+        matchesFilter = (e.status === state.activeFilter);
+      }
+
       const matchesSearch = !search ||
         e.event_type.toLowerCase().includes(search) ||
         e.description.toLowerCase().includes(search) ||
         (e.reviewer && e.reviewer.toLowerCase().includes(search));
+
       return matchesFilter && matchesSearch;
     });
 
+    // Update filter badge counters accurately
     el.countAll.textContent = state.events.length;
     el.countProposed.textContent = state.events.filter(e => e.status === "proposed" || e.status === "under_review").length;
     el.countConfirmed.textContent = state.events.filter(e => e.status === "confirmed").length;
@@ -781,13 +1240,15 @@
 
     el.eventsList.innerHTML = "";
     if (filtered.length === 0) {
-      el.eventsList.innerHTML = `<div class="empty-state">No ${state.activeFilter} events recorded.</div>`;
+      const filterLabel = state.activeFilter === "proposed" ? "pending review" : state.activeFilter;
+      el.eventsList.innerHTML = `<div class="empty-state">No ${filterLabel} events found.</div>`;
       return;
     }
 
     filtered.forEach((evt) => {
       const card = document.createElement("div");
       card.className = `event-card ${evt.status}`;
+      card.id = `eventCard-${evt.event_id}`;
 
       const timeRange = (evt.start_seconds !== null && evt.end_seconds !== null)
         ? `${evt.start_seconds.toFixed(1)}s &ndash; ${evt.end_seconds.toFixed(1)}s`
@@ -797,12 +1258,11 @@
       if (evt.reviewer || evt.review_notes) {
         reviewNotesHtml = `
           <div class="event-review-notes">
-            <strong>${evt.reviewer || "Investigator"}:</strong> ${evt.review_notes || "Verified by forensic analyst"}
+            <strong>${escapeHtml(evt.reviewer || "Investigator")}:</strong> ${escapeHtml(evt.review_notes || "Verified by forensic analyst")}
           </div>
         `;
       }
 
-      // Check if event mentions camera
       let cameraBadgeHtml = "";
       const matchedCam = state.mediaAssets.find(ma => ma.camera_id && evt.description.toLowerCase().includes(ma.camera_id.toLowerCase()));
       if (matchedCam) {
@@ -812,37 +1272,96 @@
       card.innerHTML = `
         <div class="event-card-head">
           <div style="display:flex; align-items:center; gap:6px;">
-            <span class="event-card-type">${evt.event_type.replace(/_/g, " ").toUpperCase()}</span>
+            <span class="event-card-type">${escapeHtml(evt.event_type.replace(/_/g, " ").toUpperCase())}</span>
             ${cameraBadgeHtml}
           </div>
           <span class="status-pill status-${evt.status}">${evt.status}</span>
         </div>
         <div class="event-card-id">#${evt.event_id} &bull; Interval: <strong>${timeRange}</strong></div>
-        <div class="event-card-desc">${evt.description}</div>
+        <div class="event-card-desc">${escapeHtml(evt.description)}</div>
         ${reviewNotesHtml}
         <div class="event-card-actions">
-          <button class="btn btn-sm btn-confirm" data-id="${evt.event_id}" title="Confirm Verified Event">&#x2714; Confirm</button>
-          <button class="btn btn-sm btn-reject" data-id="${evt.event_id}" title="Dismiss as False Positive">&#x2716; Reject</button>
-          <button class="btn btn-sm btn-edit" data-id="${evt.event_id}" title="Edit Interval or Add Rationale Notes">&#x270E; Edit</button>
+          <button class="btn btn-sm btn-confirm" data-id="${evt.event_id}" title="Confirm Verified Event (Removes from pending queue)">&#x2714; Confirm</button>
+          <button class="btn btn-sm btn-reject" data-id="${evt.event_id}" title="Dismiss as False Positive (Removes from pending queue)">&#x2716; Reject</button>
+          <button class="btn btn-sm btn-edit" data-id="${evt.event_id}" title="Edit Interval or Rationale Notes">&#x270E; Edit</button>
           <button class="btn btn-sm btn-outline btn-seek" data-time="${evt.start_seconds || 0}" title="Seek Player to Start">&#x25B6; Seek</button>
           <button class="btn btn-sm btn-clip" data-id="${evt.event_id}" title="Slice H.264 video sub-clip">&#x2702; Cut Clip</button>
         </div>
       `;
 
-      // Button handlers
-      card.querySelector(".btn-confirm").addEventListener("click", () => openReviewModal(evt, "confirmed"));
-      card.querySelector(".btn-reject").addEventListener("click", () => openReviewModal(evt, "rejected"));
+      // Quick Confirm Action with in-flight duplicate prevention
+      const confirmBtn = card.querySelector(".btn-confirm");
+      confirmBtn.addEventListener("click", async () => {
+        await executeEventDecision(evt, "confirmed", card);
+      });
+
+      // Quick Reject Action with in-flight duplicate prevention
+      const rejectBtn = card.querySelector(".btn-reject");
+      rejectBtn.addEventListener("click", async () => {
+        await executeEventDecision(evt, "rejected", card);
+      });
+
+      // Edit Button opens detailed review modal
       card.querySelector(".btn-edit").addEventListener("click", () => openReviewModal(evt, evt.status));
+
+      // Seek Player to Event Time
       card.querySelector(".btn-seek").addEventListener("click", () => {
         if (matchedCam) {
           switchCameraFeed(matchedCam.media_asset_id, false);
         }
         if (evt.start_seconds !== null) el.mainVideoPlayer.currentTime = evt.start_seconds;
       });
+
+      // Slice Incident Clip
       card.querySelector(".btn-clip").addEventListener("click", () => sliceEventClipDirectly(evt.event_id));
 
       el.eventsList.appendChild(card);
     });
+  }
+
+  async function executeEventDecision(evt, targetStatus, cardElement) {
+    const invId = state.activeInvestigationId;
+    if (!invId) return;
+
+    // Prevent duplicate submissions
+    const actionBtns = cardElement ? cardElement.querySelectorAll(".event-card-actions button") : [];
+    actionBtns.forEach(b => { b.disabled = true; });
+
+    const payload = {
+      status: targetStatus,
+      reviewer: "Lead Investigator",
+      notes: targetStatus === "confirmed" ? "Verified and confirmed by forensic analyst." : "Dismissed as non-incident false positive.",
+      event_type: evt.event_type,
+      start_seconds: evt.start_seconds,
+      end_seconds: evt.end_seconds,
+    };
+
+    try {
+      await apiFetch(`/api/v1/investigations/${invId}/events/${evt.event_id}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      // Update local event data
+      evt.status = targetStatus;
+      evt.reviewer = payload.reviewer;
+      evt.review_notes = payload.notes;
+
+      showToast(`Event #${evt.event_id} marked as ${targetStatus.toUpperCase()}`, "success");
+
+      // Re-render: if activeFilter is 'proposed', the confirmed/rejected event automatically disappears!
+      renderEvents();
+      renderTimelineMarkers();
+
+      // Refresh background audit trail & metrics
+      refreshActiveCase();
+    } catch (err) {
+      console.error(err);
+      // Re-enable buttons if failed, keeping the item in the pending queue
+      actionBtns.forEach(b => { b.disabled = false; });
+      showToast(`Failed to update event: ${err.message}`, "error");
+    }
   }
 
   async function sliceEventClipDirectly(eventId) {
@@ -891,11 +1410,12 @@
     el.revEndSec.value = evt.end_seconds !== null ? evt.end_seconds : "";
     el.revDescriptionInput.value = evt.description || "";
     el.revNotesInput.value = evt.review_notes || "";
-    el.revReviewerInput.value = evt.reviewer || "Investigator";
+    el.revReviewerInput.value = evt.reviewer || "Lead Investigator";
 
     const radio = el.reviewForm.querySelector(`input[name="revStatus"][value="${targetStatus}"]`);
     if (radio) radio.checked = true;
 
+    el.saveReviewBtn.disabled = false;
     el.reviewModal.classList.remove("hidden");
   }
 
@@ -910,13 +1430,15 @@
 
     const payload = {
       status: statusVal,
-      reviewer: el.revReviewerInput.value.trim(),
+      reviewer: el.revReviewerInput.value.trim() || "Lead Investigator",
       notes: el.revNotesInput.value.trim(),
       description: el.revDescriptionInput.value.trim(),
       event_type: el.revCategoryInput.value.trim(),
       start_seconds: el.revStartSec.value ? parseFloat(el.revStartSec.value) : null,
       end_seconds: el.revEndSec.value ? parseFloat(el.revEndSec.value) : null,
     };
+
+    el.saveReviewBtn.disabled = true;
 
     try {
       await apiFetch(`/api/v1/investigations/${invId}/events/${eventId}/review`, {
@@ -925,11 +1447,27 @@
         body: JSON.stringify(payload),
       });
 
+      // Update local event
+      const localEvt = state.events.find(ev => ev.event_id === eventId);
+      if (localEvt) {
+        localEvt.status = statusVal;
+        localEvt.reviewer = payload.reviewer;
+        localEvt.review_notes = payload.notes;
+        localEvt.description = payload.description;
+        localEvt.event_type = payload.event_type;
+        localEvt.start_seconds = payload.start_seconds;
+        localEvt.end_seconds = payload.end_seconds;
+      }
+
       showToast(`Event #${eventId} marked as ${statusVal.toUpperCase()}`, "success");
       el.reviewModal.classList.add("hidden");
+
+      renderEvents();
+      renderTimelineMarkers();
       refreshActiveCase();
     } catch (err) {
       console.error(err);
+      el.saveReviewBtn.disabled = false;
     }
   });
 
@@ -944,7 +1482,6 @@
     el.framesCount.textContent = frames.length;
     el.clipsCount.textContent = clips.length;
 
-    // Render Audio Trail & Frames
     el.frameGallery.innerHTML = "";
 
     if (audioArtifacts.length > 0) {
@@ -1040,7 +1577,8 @@
   });
 
   // -------------------------------------------------------------------------
-
+  // Helper Functions for Observations & Rationale Text
+  // -------------------------------------------------------------------------
   function formatSecondsToTimecode(sec) {
     if (sec === null || sec === undefined || isNaN(sec)) return "-";
     const mins = Math.floor(sec / 60);
@@ -1071,6 +1609,7 @@
     return clean || text.trim();
   }
 
+  // -------------------------------------------------------------------------
   // Observations Drawer Table
   // -------------------------------------------------------------------------
   function renderObservations() {
@@ -1106,7 +1645,6 @@
       const provName = obs.provenance ? `${obs.provenance.producer_name}` : "-";
       const cleanDesc = cleanObservationDesc(obs.description);
 
-      // Determine Camera Attribution
       let camLabel = "MAIN";
       let targetAssetId = sr?.media_asset_id || null;
 
@@ -1122,7 +1660,6 @@
         }
       }
 
-      // Check if camera label maps to an asset
       const matchedAsset = state.mediaAssets.find(m => m.camera_id && m.camera_id.toLowerCase() === camLabel.toLowerCase()) ||
                            state.mediaAssets.find(m => m.media_asset_id === targetAssetId);
 
@@ -1133,11 +1670,10 @@
         <td><strong>${obs.observation_type.replace(/_/g, " ")}</strong></td>
         <td>${intervalStr}</td>
         <td>${confHtml}</td>
-        <td>${cleanDesc}</td>
+        <td>${escapeHtml(cleanDesc)}</td>
         <td><small style="color:var(--text-dim);">${provName}</small></td>
       `;
 
-      // Clicking an observation jumps player to corresponding camera feed & timecode
       row.style.cursor = "pointer";
       row.addEventListener("click", () => {
         if (matchedAsset) {
@@ -1174,7 +1710,7 @@
         <td><span class="badge">${as.target_type}</span></td>
         <td><strong>${as.assessment_type.replace(/_/g, " ").toUpperCase()}</strong></td>
         <td><span class="rating-badge ${ratingClass}">${as.rating.toUpperCase()}</span></td>
-        <td>${cleanRat}</td>
+        <td>${escapeHtml(cleanRat)}</td>
         <td><small style="color:var(--text-dim);">${as.assessed_by}</small></td>
       `;
       el.assessmentsTable.appendChild(row);
@@ -1202,11 +1738,11 @@
 
       row.innerHTML = `
         <td>${timeStr}</td>
-        <td><strong>${log.actor}</strong></td>
-        <td><code>${log.action}</code></td>
-        <td>${log.target_id}</td>
+        <td><strong>${escapeHtml(log.actor)}</strong></td>
+        <td><code>${escapeHtml(log.action)}</code></td>
+        <td>${escapeHtml(log.target_id)}</td>
         <td>${changesStr}</td>
-        <td>${log.notes || "-"}</td>
+        <td>${escapeHtml(log.notes || "-")}</td>
       `;
       el.auditTable.appendChild(row);
     });
@@ -1239,18 +1775,23 @@
   // Report Preview & Finalization
   // -------------------------------------------------------------------------
   async function loadReportPreview() {
+    if (!state.activeInvestigationId) {
+      el.reportPreviewBox.innerHTML = `<div class="gallery-empty">Select or load an investigation to view findings.</div>`;
+      return;
+    }
+
     try {
       const report = await apiFetch(`/api/v1/investigations/${state.activeInvestigationId}/report`);
       el.reportPreviewBox.innerHTML = `
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-          <h4 style="color:#93c5fd; margin:0;">${report.title}</h4>
+          <h4 style="color:#93c5fd; margin:0;">${escapeHtml(report.title)}</h4>
           <span class="status-pill status-${report.status}">v${report.version} &bull; ${report.status.toUpperCase()}</span>
         </div>
-        <p style="margin-bottom: 12px; color:#e2e8f0; white-space:pre-line; line-height:1.5;">${report.summary}</p>
+        <p style="margin-bottom: 12px; color:#e2e8f0; white-space:pre-line; line-height:1.5;">${escapeHtml(report.summary)}</p>
         <div style="display:flex; gap:10px; align-items:center; font-size:0.75rem; color:#94a3b8; border-top: 1px solid var(--border-color); padding-top: 8px;">
-          <span>Generated by: <strong>${report.generated_by}</strong></span>
+          <span>Generated by: <strong>${escapeHtml(report.generated_by)}</strong></span>
           <span>&bull;</span>
-          <span>Finalized by: <strong>${report.finalized_by || "Pending Sign-off"}</strong></span>
+          <span>Finalized by: <strong>${escapeHtml(report.finalized_by || "Pending Sign-off")}</strong></span>
           <div style="margin-left:auto; display:flex; gap:6px;">
             <button class="btn btn-sm btn-outline" id="quickExportPdfBtn">&#x1F4C4; PDF</button>
             <button class="btn btn-sm btn-outline" id="quickExportHtmlBtn">&#x1F310; HTML</button>
@@ -1279,21 +1820,25 @@
 
   el.exportPdfBtn.addEventListener("click", () => {
     el.exportMenu.classList.add("hidden");
+    if (!state.activeInvestigationId) { showToast("No active case to export", "error"); return; }
     window.open(`/api/v1/investigations/${state.activeInvestigationId}/export/pdf`, "_blank");
   });
 
   el.exportHtmlBtn.addEventListener("click", () => {
     el.exportMenu.classList.add("hidden");
+    if (!state.activeInvestigationId) { showToast("No active case to export", "error"); return; }
     window.open(`/api/v1/investigations/${state.activeInvestigationId}/export/html`, "_blank");
   });
 
   el.exportMdBtn.addEventListener("click", () => {
     el.exportMenu.classList.add("hidden");
+    if (!state.activeInvestigationId) { showToast("No active case to export", "error"); return; }
     window.open(`/api/v1/investigations/${state.activeInvestigationId}/report?format=markdown`, "_blank");
   });
 
   el.finalizeReportBtn.addEventListener("click", () => {
     el.exportMenu.classList.add("hidden");
+    if (!state.activeInvestigationId) { showToast("No active case to finalize", "error"); return; }
     el.finalizeModal.classList.remove("hidden");
   });
 
@@ -1310,6 +1855,8 @@
       auto_slice_clips: document.getElementById("finAutoClips").checked,
     };
 
+    el.submitFinalizeBtn.disabled = true;
+
     try {
       const res = await apiFetch(`/api/v1/investigations/${invId}/report/finalize`, {
         method: "POST",
@@ -1322,24 +1869,16 @@
       refreshActiveCase();
     } catch (err) {
       console.error(err);
+    } finally {
+      el.submitFinalizeBtn.disabled = false;
     }
   });
 
   // -------------------------------------------------------------------------
-  // New Investigation Modal & Multi-Video Sequential Ingestion
+  // New Investigation Modal & Ingestion
   // -------------------------------------------------------------------------
   let isAppendingVideos = false;
   let userEditedTitle = false;
-
-  function escapeHtml(str) {
-    if (!str) return "";
-    return String(str)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
-  }
 
   function suggestCameraId(filename, index) {
     if (!filename) return `cam-${String(index + 1).padStart(2, "0")}`;
@@ -1386,7 +1925,7 @@
       el.selectedFeedsQueue.classList.add("hidden");
       if (el.addMoreVideosBtn) el.addMoreVideosBtn.classList.add("hidden");
       if (el.clearAllVideosBtn) el.clearAllVideosBtn.classList.add("hidden");
-      if (el.browseVideosBtn) el.browseVideosBtn.textContent = "📁 Select Video Files (Multiple)";
+      if (el.browseVideosBtn) el.browseVideosBtn.textContent = "\uD83D\uDCC1 Select Video Files (Multiple)";
       if (!userEditedTitle && el.invTitleInput) el.invTitleInput.value = "";
       syncCameraIdsSummary();
       return;
@@ -1395,7 +1934,7 @@
     el.selectedFeedsQueue.classList.remove("hidden");
     if (el.addMoreVideosBtn) el.addMoreVideosBtn.classList.remove("hidden");
     if (el.clearAllVideosBtn) el.clearAllVideosBtn.classList.remove("hidden");
-    if (el.browseVideosBtn) el.browseVideosBtn.textContent = "🔄 Replace All Files";
+    if (el.browseVideosBtn) el.browseVideosBtn.textContent = "\uD83D\uDD04 Replace All Files";
 
     el.selectedFeedsList.innerHTML = state.selectedFeeds.map((feed, idx) => `
       <div class="feed-row-item" data-feed-id="${feed.id}">
@@ -1412,7 +1951,6 @@
       </div>
     `).join("");
 
-    // Wire camera ID inputs
     el.selectedFeedsList.querySelectorAll(".feed-cam-input").forEach((inp) => {
       inp.addEventListener("input", (e) => {
         const idx = parseInt(e.target.dataset.index, 10);
@@ -1423,7 +1961,6 @@
       });
     });
 
-    // Wire remove buttons
     el.selectedFeedsList.querySelectorAll(".feed-remove-btn").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -1432,7 +1969,6 @@
       });
     });
 
-    // Update auto title if not customized
     if (!userEditedTitle && el.invTitleInput) {
       if (count === 1) {
         el.invTitleInput.value = `Premise Investigation: ${state.selectedFeeds[0].name}`;
@@ -1487,7 +2023,6 @@
     renderSelectedFeeds();
   }
 
-  // Browse multiple videos button
   if (el.browseVideosBtn) {
     el.browseVideosBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1497,7 +2032,6 @@
     });
   }
 
-  // Add more videos button
   if (el.addMoreVideosBtn) {
     el.addMoreVideosBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1507,7 +2041,6 @@
     });
   }
 
-  // Clear all button
   if (el.clearAllVideosBtn) {
     el.clearAllVideosBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1515,7 +2048,6 @@
     });
   }
 
-  // File input change handler
   if (el.videoFileInput) {
     el.videoFileInput.addEventListener("change", () => {
       if (el.videoFileInput.files && el.videoFileInput.files.length > 0) {
@@ -1524,7 +2056,6 @@
     });
   }
 
-  // Drop zone events (avoid opening dialog if user clicked an inner button)
   if (el.dropZone) {
     el.dropZone.addEventListener("click", (e) => {
       if (e.target.closest("button") || e.target.closest("input")) return;
@@ -1546,7 +2077,6 @@
     });
   }
 
-  // Form Submission
   el.newInvForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (!state.selectedFeeds || state.selectedFeeds.length === 0) {
@@ -1598,7 +2128,8 @@
       el.newInvForm.reset();
       clearSelectedFeeds();
 
-      await loadInvestigations(inv.investigation_id);
+      // Switch to this new investigation
+      await loadInvestigations(inv.investigation_id, true);
     } catch (err) {
       showToast(err.message, "error");
     } finally {
@@ -1608,7 +2139,7 @@
   });
 
   // -------------------------------------------------------------------------
-  // Add Additional Camera Feed Modal (Active Investigation)
+  // Additional Camera Feed Ingestion
   // -------------------------------------------------------------------------
   if (el.openAddFeedModalBtn) {
     el.openAddFeedModalBtn.addEventListener("click", () => {
@@ -1743,7 +2274,7 @@
   el.placeholderDemoBtn.addEventListener("click", loadDemoCase);
 
   // -------------------------------------------------------------------------
-  // Keyboard Shortcuts & Modals
+  // Keyboard Shortcuts
   // -------------------------------------------------------------------------
   function openHotkeysModal() {
     el.hotkeysModal.classList.remove("hidden");
@@ -1754,6 +2285,21 @@
   el.dismissHotkeysBtn.addEventListener("click", () => el.hotkeysModal.classList.add("hidden"));
 
   document.addEventListener("keydown", (e) => {
+    // If landing page is visible
+    if (!el.landingPage.classList.contains("hidden")) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        navigateToWorkspace();
+        return;
+      }
+      if (e.key === "d" || e.key === "D") {
+        e.preventDefault();
+        showDashboard();
+        loadDemoCase();
+        return;
+      }
+    }
+
     if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
       if (e.key === "Escape") document.activeElement.blur();
       return;
@@ -1814,12 +2360,15 @@
     }
   });
 
-  el.invSelect.addEventListener("change", (e) => setActiveInvestigation(e.target.value));
+  el.invSelect.addEventListener("change", (e) => {
+    setActiveInvestigation(e.target.value);
+  });
+
   el.refreshInvBtn.addEventListener("click", () => {
-    loadInvestigations();
+    loadInvestigations(state.activeInvestigationId, false);
     showToast("Case catalog refreshed", "info");
   });
 
-  // Initial Load
-  loadInvestigations();
+  // Initialize Route
+  handleRoute();
 })();

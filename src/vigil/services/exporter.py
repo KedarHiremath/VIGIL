@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import io
+import re
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -782,6 +783,38 @@ class ReportExporter:
             leading=10,
             textColor=colors.white,
         )
+        summary_h3_style = ParagraphStyle(
+            "SummaryH3",
+            parent=normal,
+            fontName="Helvetica-Bold",
+            fontSize=10,
+            leading=14,
+            textColor=colors.HexColor("#1e3a8a"),
+            spaceBefore=8,
+            spaceAfter=4,
+            keepWithNext=True,
+        )
+        summary_bullet_style = ParagraphStyle(
+            "SummaryBullet",
+            parent=body_style,
+            leftIndent=14,
+            firstLineIndent=-10,
+            spaceAfter=3,
+        )
+        summary_body_style = ParagraphStyle(
+            "SummaryBodyText",
+            parent=body_style,
+            spaceAfter=4,
+        )
+
+        def _format_inline_markdown(text: str) -> str:
+            if not text:
+                return ""
+            text = html.escape(text)
+            text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+            text = re.sub(r"(?<!\*)\*([^*]+?)\*(?!\*)", r"<i>\1</i>", text)
+            text = re.sub(r"`([^`]+?)`", r'<font face="Courier" color="#0369a1">\1</font>', text)
+            return text
 
         story = []
 
@@ -853,24 +886,34 @@ class ReportExporter:
             Paragraph("1. Executive Summary & Forensic Objective", h2_style)
         )
         story.append(
-            Paragraph(f"<b>Objective:</b> {investigation.objective}", body_style)
+            Paragraph(f"<b>Objective:</b> {_format_inline_markdown(investigation.objective)}", body_style)
         )
-        story.append(Spacer(1, 4))
-        summary_box = Table(
-            [[Paragraph(report.summary.replace("\n", "<br/>"), body_style)]],
-            colWidths=[7.0 * inch],
-        )
-        summary_box.setStyle(
-            TableStyle([
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#eff6ff")),
-                ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#bfdbfe")),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ])
-        )
-        story.append(summary_box)
+        story.append(Spacer(1, 6))
+
+        summary_lines = (report.summary or "").strip().splitlines()
+        for s_line in summary_lines:
+            s_stripped = s_line.strip()
+            if not s_stripped:
+                story.append(Spacer(1, 3))
+                continue
+            if s_stripped.startswith("#"):
+                clean_head = re.sub(r"^#+\s*", "", s_stripped)
+                story.append(Paragraph(_format_inline_markdown(clean_head), summary_h3_style))
+            elif s_stripped.startswith(("- ", "* ")) or re.match(r"^\d+\.\s", s_stripped):
+                clean_bullet = re.sub(r"^(?:[-*]|\d+\.)\s*", "&bull; ", s_stripped)
+                story.append(Paragraph(_format_inline_markdown(clean_bullet), summary_bullet_style))
+            else:
+                story.append(Paragraph(_format_inline_markdown(s_stripped), summary_body_style))
+
+        if report.notes:
+            story.append(Spacer(1, 4))
+            story.append(
+                Paragraph(
+                    f"<b>Final Reviewer Notes:</b> {_format_inline_markdown(report.notes)}",
+                    body_style,
+                )
+            )
+
         story.append(Spacer(1, 10))
 
         story.append(
@@ -926,6 +969,7 @@ class ReportExporter:
         evt_table = Table(
             event_table_data,
             colWidths=[1.0 * inch, 1.2 * inch, 1.0 * inch, 1.0 * inch, 2.8 * inch],
+            repeatRows=1,
         )
         evt_table.setStyle(
             TableStyle([
@@ -983,6 +1027,7 @@ class ReportExporter:
         clip_table = Table(
             clip_data,
             colWidths=[1.5 * inch, 1.0 * inch, 1.0 * inch, 1.7 * inch, 1.8 * inch],
+            repeatRows=1,
         )
         clip_table.setStyle(
             TableStyle([
@@ -1035,6 +1080,7 @@ class ReportExporter:
         audit_table = Table(
             audit_data,
             colWidths=[1.4 * inch, 1.1 * inch, 1.2 * inch, 1.2 * inch, 2.1 * inch],
+            repeatRows=1,
         )
         audit_table.setStyle(
             TableStyle([
