@@ -56,6 +56,7 @@ class VigilConfig:
     # ------------------------------------------------------------------
     storage_root: str = "./storage_data"
     log_level: str = "INFO"
+    report_max_evidence_frames: int = 3
 
     @classmethod
     def from_env(cls) -> "VigilConfig":
@@ -114,6 +115,9 @@ class VigilConfig:
             ),
             storage_root=os.getenv("VIGIL_STORAGE_ROOT", "./storage_data"),
             log_level=os.getenv("VIGIL_LOG_LEVEL", "INFO"),
+            report_max_evidence_frames=int(
+                os.getenv("VIGIL_REPORT_MAX_EVIDENCE_FRAMES", "3")
+            ),
         )
 
 

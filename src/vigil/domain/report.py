@@ -1,7 +1,7 @@
 """Domain schema for investigation reports."""
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 
@@ -34,6 +34,14 @@ class Report(DomainModel):
     clip_artifact_ids: ReferenceIds = Field(
         default_factory=list,
         description="Artifact IDs for playable incident sub-clips embedded in the report.",
+    )
+    evidence_frame_artifact_ids: ReferenceIds = Field(
+        default_factory=list,
+        description="Artifact IDs for selected incident frames embedded in the report.",
+    )
+    visual_evidence: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Structured visual evidence items containing frame refs, captions, tags, and annotations.",
     )
     notes: str | None = Field(
         default=None,

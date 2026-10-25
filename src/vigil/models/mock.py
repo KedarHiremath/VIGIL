@@ -104,32 +104,51 @@ class MockLLMClient(BaseLLMClient):
         json_mode: bool = False,
     ) -> LLMResponse:
         self.call_count += 1
-        response_obj = {
-            "observations": [
-                {
-                    "observation_type": "person_detection",
-                    "description": "Adult male in dark jacket and denim trousers walking eastward.",
-                    "confidence": 0.94,
-                    "entity": {
-                        "entity_type": "person",
+        prompt_lower = prompt.lower()
+        if "localiz" in prompt_lower or "box_2d" in prompt_lower or "bounding" in prompt_lower:
+            response_obj = {
+                "caption": "Forensic scene detection: Subject moving across perimeter near north gate.",
+                "tags": ["person", "suspect", "perimeter", "breach"],
+                "detections": [
+                    {
+                        "category": "person",
                         "label": "Suspect-1",
+                        "box_2d": [0.18, 0.25, 0.42, 0.82],
                         "attributes": {
                             "clothing_upper": "dark jacket",
                             "clothing_lower": "denim trousers",
                         },
+                        "confidence": 0.94,
+                    }
+                ],
+            }
+        else:
+            response_obj = {
+                "observations": [
+                    {
+                        "observation_type": "person_detection",
+                        "description": "Adult male in dark jacket and denim trousers walking eastward.",
+                        "confidence": 0.94,
+                        "entity": {
+                            "entity_type": "person",
+                            "label": "Suspect-1",
+                            "attributes": {
+                                "clothing_upper": "dark jacket",
+                                "clothing_lower": "denim trousers",
+                            },
+                        },
                     },
-                },
-                {
-                    "observation_type": "vehicle_detection",
-                    "description": "White 4-door sedan stationary near loading bay.",
-                    "confidence": 0.89,
-                    "entity": {
-                        "entity_type": "vehicle",
-                        "label": "Vehicle-1",
-                        "attributes": {"color": "white", "vehicle_type": "sedan"},
+                    {
+                        "observation_type": "vehicle_detection",
+                        "description": "White 4-door sedan stationary near loading bay.",
+                        "confidence": 0.89,
+                        "entity": {
+                            "entity_type": "vehicle",
+                            "label": "Vehicle-1",
+                            "attributes": {"color": "white", "vehicle_type": "sedan"},
+                        },
                     },
-                },
-            ]
-        }
+                ]
+            }
         content = json.dumps(response_obj)
         return LLMResponse(content=content, model_name=self.model_name)

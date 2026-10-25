@@ -199,6 +199,35 @@ class ReportGeneratorWorker(BaseToolWorker):
         except Exception as exc:
             logger.warning("ReportGeneratorWorker: LLM call failed (%s); using baseline summary.", exc)
 
+        # ----------------------------------------------------------------------
+        # Visual Evidence Selection & Localization (Feature A & B)
+        # Select up to max_evidence_frames (default 3), localize entities, and
+        # produce non-destructive derivative overlays.
+        # ----------------------------------------------------------------------
+        evidence_items: list[dict[str, Any]] = []
+        evidence_artifact_ids: list[str] = []
+        try:
+            from vigil.config import config
+            from vigil.tools.visual_annotator import VisualEvidenceAnnotator
+            annotator = VisualEvidenceAnnotator(
+                repository=self.repository,
+                llm_client=self.llm,
+            )
+            default_limit = getattr(config, "report_max_evidence_frames", 3)
+            max_evidence_frames = int(request.parameters.get("max_evidence_frames", default_limit))
+            evidence_objs = annotator.prepare_visual_evidence(
+                investigation_id=investigation_id,
+                max_frames=max_evidence_frames,
+            )
+            for item in evidence_objs:
+                evidence_items.append(item.model_dump())
+                evidence_artifact_ids.append(item.artifact_id)
+        except Exception as exc:
+            logger.warning(
+                "ReportGeneratorWorker: Visual evidence preparation failed (%s); continuing without visual overlays.",
+                exc,
+            )
+
         report_id = f"rep-{uuid.uuid4().hex[:8]}"
         report = Report(
             report_id=report_id,
@@ -209,6 +238,8 @@ class ReportGeneratorWorker(BaseToolWorker):
             event_ids=event_ids,
             assessment_ids=assessment_ids,
             coverage_ids=coverage_ids,
+            evidence_frame_artifact_ids=evidence_artifact_ids,
+            visual_evidence=evidence_items,
             generated_by=str(
                 request.parameters.get("generated_by", "vigil-lead-investigator")
             ),

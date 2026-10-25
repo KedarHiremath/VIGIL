@@ -719,6 +719,28 @@ class InvestigationService:
         coverages = self.get_coverage_records(investigation_id)
         assessments = self.get_evidence_assessments(investigation_id)
 
+        visual_evidence: list[dict[str, Any]] = []
+        evidence_frame_ids: list[str] = []
+        if existing_reports:
+            last_rep = existing_reports[-1]
+            visual_evidence = list(getattr(last_rep, "visual_evidence", []))
+            evidence_frame_ids = list(getattr(last_rep, "evidence_frame_artifact_ids", []))
+
+        if not visual_evidence:
+            try:
+                from vigil.tools.visual_annotator import VisualEvidenceAnnotator
+                annotator = VisualEvidenceAnnotator(
+                    repository=self.repository,
+                    llm_client=getattr(self.orchestrator, "llm", None),
+                    storage_dir=self.storage_dir,
+                )
+                evidence_objs = annotator.prepare_visual_evidence(investigation_id, max_frames=3)
+                for item in evidence_objs:
+                    visual_evidence.append(item.model_dump())
+                    evidence_frame_ids.append(item.artifact_id)
+            except Exception as exc:
+                logger.warning("finalize_report: Visual evidence preparation fallback failed: %s", exc)
+
         final_report = Report(
             report_id=report_id,
             investigation_id=investigation_id,
@@ -731,6 +753,8 @@ class InvestigationService:
             version=version,
             status="finalized",
             clip_artifact_ids=list(dict.fromkeys(clip_ids)),
+            evidence_frame_artifact_ids=evidence_frame_ids,
+            visual_evidence=visual_evidence,
             notes=notes,
             finalized_at=datetime.now(UTC),
             finalized_by=finalized_by,

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import html
 import io
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -84,6 +86,7 @@ class ReportExporter:
         audit_logs: list[AuditLog],
         media_assets: list[MediaAsset] | None = None,
         base_url: str = "",
+        visual_evidence: list[dict[str, Any]] | None = None,
     ) -> str:
         """Render complete forensic report as a standalone responsive HTML document with embedded incident clips."""
         media_assets = media_assets or []
@@ -353,6 +356,54 @@ class ReportExporter:
       background-color: rgba(255, 255, 255, 0.02);
     }}
 
+    .evidence-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 1.5rem;
+      margin-top: 1rem;
+    }}
+    .evidence-card {{
+      background-color: rgba(15, 23, 42, 0.7);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem;
+      overflow: hidden;
+    }}
+    .evidence-img-box {{
+      background: #000;
+      border-radius: 6px;
+      overflow: hidden;
+      margin-bottom: 0.85rem;
+      border: 1px solid var(--border);
+      text-align: center;
+    }}
+    .evidence-img {{
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+    }}
+    .tag-badge {{
+      display: inline-block;
+      padding: 0.2rem 0.5rem;
+      background: rgba(56, 189, 248, 0.15);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 4px;
+      font-size: 0.75rem;
+      margin-right: 0.35rem;
+      margin-bottom: 0.35rem;
+    }}
+    .disclaimer-banner {{
+      font-size: 0.75rem;
+      color: #fbbf24;
+      background: rgba(245, 158, 11, 0.1);
+      border-left: 3px solid #f59e0b;
+      padding: 0.4rem 0.6rem;
+      border-radius: 0 4px 4px 0;
+      margin-bottom: 0.75rem;
+    }}
+
     @media print {{
       body {{ background: #fff; color: #000; padding: 0; }}
       header.report-header, section.report-section, .event-card {{
@@ -490,9 +541,93 @@ class ReportExporter:
 
         doc += """
   </section>
+"""
+
+        visual_evidence = visual_evidence or getattr(report, "visual_evidence", []) or []
+
+        doc += """
+  <section class="report-section">
+    <h2>3. Forensic Visual Evidence &amp; Incident Key Frames</h2>
+"""
+        if not visual_evidence:
+            doc += """<p style="color: var(--text-muted);">No incident key frames selected for this report.</p>"""
+        else:
+            doc += """<div class="evidence-grid">"""
+            for item in visual_evidence[:3]:
+                # Determine image src: prefer base64 data URI of local file
+                img_src = ""
+                local_f = _uri_to_local_path(item.get("storage_uri", ""))
+                if not local_f or not local_f.is_file():
+                    local_f = _uri_to_local_path(item.get("original_storage_uri", ""))
+
+                if local_f and local_f.is_file():
+                    try:
+                        b64_data = base64.b64encode(local_f.read_bytes()).decode("ascii")
+                        img_src = f"data:image/jpeg;base64,{b64_data}"
+                    except Exception:
+                        img_src = ""
+
+                if not img_src:
+                    target_aid = item.get("annotated_artifact_id") or item.get("artifact_id", "")
+                    img_src = f"{base_url}/api/v1/investigations/{investigation.investigation_id}/artifacts/{target_aid}/content"
+
+                # Badges and tags
+                tag_html = "".join(f'<span class="tag-badge">#{html.escape(t)}</span>' for t in item.get("tags", []))
+
+                ents = item.get("resolved_entity_ids", [])
+                ents_html = ", ".join(f"<code>{html.escape(e)}</code>" for e in ents) if ents else "None"
+
+                cam_name = item.get("camera_label") or item.get("camera_id") or "Surveillance Feed"
+                t_sec = item.get("timestamp_seconds")
+                t_display = f"{_format_timecode(t_sec)} ({t_sec:.1f}s)" if t_sec is not None else "N/A"
+
+                overlay_note = ""
+                if item.get("has_overlay"):
+                    overlay_note = """
+                    <div class="disclaimer-banner">
+                      &#9888; <strong>Model-Generated Overlay:</strong> Bounding boxes and labels are AI-generated detections and require human verification.
+                    </div>
+                    """
+                else:
+                    overlay_note = """
+                    <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.5rem;">
+                      Original unannotated frame (no reliable detections detected).
+                    </div>
+                    """
+
+                orig_aid = item.get("artifact_id", "N/A")
+                ann_aid = item.get("annotated_artifact_id")
+                aid_display = f"<code>{html.escape(orig_aid)}</code>"
+                if ann_aid:
+                    aid_display += f" &bull; Annotated: <code>{html.escape(ann_aid)}</code>"
+
+                doc += f"""
+    <div class="evidence-card">
+      <div class="evidence-img-box">
+        <img class="evidence-img" src="{img_src}" alt="Key Frame Evidence: {html.escape(orig_aid)}" loading="lazy" />
+      </div>
+      {overlay_note}
+      <div style="font-size: 0.95rem; font-weight: 600; color: #f1f5f9; margin-bottom: 0.5rem;">
+        {html.escape(item.get("caption", "Forensic incident frame evidence."))}
+      </div>
+      <div style="margin-bottom: 0.75rem;">
+        {tag_html}
+      </div>
+      <div style="font-size: 0.8rem; color: var(--text-muted); border-top: 1px solid var(--border); padding-top: 0.5rem; line-height: 1.6;">
+        <div><strong>Timeline Context:</strong> {html.escape(cam_name)} &bull; {t_display}</div>
+        <div><strong>Resolved Entities:</strong> {ents_html}</div>
+        <div><strong>Source Artifact:</strong> {aid_display}</div>
+        <div><strong>Original URI:</strong> <code style="word-break: break-all;">{html.escape(item.get("original_storage_uri", "N/A"))}</code></div>
+      </div>
+    </div>
+"""
+            doc += """</div>"""
+
+        doc += """
+  </section>
 
   <section class="report-section">
-    <h2>3. Evidence Assessments &amp; Certainty</h2>
+    <h2>4. Evidence Assessments &amp; Certainty</h2>
     <table class="data-table">
       <thead>
         <tr>
@@ -528,7 +663,7 @@ class ReportExporter:
   </section>
 
   <section class="report-section">
-    <h2>4. Investigator Audit Trail &amp; Chain of Custody Log</h2>
+    <h2>5. Investigator Audit Trail &amp; Chain of Custody Log</h2>
     <table class="data-table">
       <thead>
         <tr>
@@ -589,6 +724,7 @@ class ReportExporter:
         artifacts: list[Artifact],
         audit_logs: list[AuditLog],
         media_assets: list[MediaAsset] | None = None,
+        visual_evidence: list[dict[str, Any]] | None = None,
     ) -> str:
         """Render complete forensic report as a structured, timestamp-indexed Markdown document."""
         media_assets = media_assets or []
@@ -650,7 +786,46 @@ class ReportExporter:
                     md.append(f"- **Reviewer Decision:** {evt.reviewer or 'Lead Investigator'} [{evt.status.upper()}] — {evt.review_notes or 'No review notes'}")
                 md.append("")
 
-        md.append("## 3. Evidence Assessments & Certainty\n")
+        visual_evidence = visual_evidence or getattr(report, "visual_evidence", []) or []
+        md.append("## 3. Forensic Visual Evidence & Incident Key Frames\n")
+        if not visual_evidence:
+            md.append("*No incident key frames selected for this report.*\n")
+        else:
+            md.append("| Frame Artifact Ref | Timeline / Camera Context | Visual Caption & Summary | Detected Tags | Resolved Entities | Overlay Status |")
+            md.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
+            for item in visual_evidence[:3]:
+                orig_aid = item.get("artifact_id", "N/A")
+                ann_aid = item.get("annotated_artifact_id")
+                aid_ref = f"`{orig_aid}`" + (f" (`{ann_aid}`)" if ann_aid else "")
+                cam_name = item.get("camera_label") or item.get("camera_id") or "Surveillance Feed"
+                t_sec = item.get("timestamp_seconds")
+                t_str = f"`{_format_timecode(t_sec)}` ({t_sec:.1f}s)" if t_sec is not None else "N/A"
+                cap_clean = str(item.get("caption", "Salient visual evidence.")).replace("|", "-")
+                tags_str = ", ".join(item.get("tags", [])) or "None"
+                ents_str = ", ".join(f"`{e}`" for e in item.get("resolved_entity_ids", [])) or "None"
+                overlay_str = "`AI OVERLAY`" if item.get("has_overlay") else "`UNANNOTATED`"
+                md.append(f"| {aid_ref} | {cam_name} ({t_str}) | {cap_clean} | {tags_str} | {ents_str} | {overlay_str} |")
+            md.append("")
+
+            for item in visual_evidence[:3]:
+                orig_aid = item.get("artifact_id", "N/A")
+                ann_aid = item.get("annotated_artifact_id")
+                md.append(f"### Visual Evidence Item: #{orig_aid}")
+                md.append(f"- **Caption:** {item.get('caption', 'Forensic incident evidence.')}")
+                cam_name = item.get("camera_label") or item.get("camera_id") or "Surveillance Feed"
+                t_sec = item.get("timestamp_seconds")
+                t_str = f"{t_sec:.1f}s" if t_sec is not None else "N/A"
+                md.append(f"- **Timeline & Camera:** {cam_name} [{t_str}]")
+                md.append(f"- **Descriptive Tags:** {', '.join(item.get('tags', [])) or 'None'}")
+                md.append(f"- **Resolved Entities:** {', '.join(item.get('resolved_entity_ids', [])) or 'None'}")
+                if ann_aid:
+                    md.append(f"- **Annotated Derivative:** `{ann_aid}` ({item.get('storage_uri', 'N/A')})")
+                md.append(f"- **Original Evidence Ref:** `{orig_aid}` ({item.get('original_storage_uri', 'N/A')})")
+                if item.get("has_overlay"):
+                    md.append("- *Note: Model-generated bounding boxes and labels are AI-generated and require human verification.*")
+                md.append("")
+
+        md.append("## 4. Evidence Assessments & Certainty\n")
         if not assessments:
             md.append("*No formal evidence assessments recorded.*\n")
         else:
@@ -661,7 +836,7 @@ class ReportExporter:
                 md.append(f"| `{ass.assessment_id}` | `{ass.target_type}:{ass.target_id}` | {ass.assessment_type.replace('_', ' ').title()} | **{ass.rating.upper()}** | {clean_rat} | {ass.assessed_by} |")
             md.append("")
 
-        md.append("## 4. Investigator Audit Log\n")
+        md.append("## 5. Investigator Audit Log\n")
         if not audit_logs:
             md.append("*No human review actions or audit logs recorded.*\n")
         else:
@@ -684,6 +859,7 @@ class ReportExporter:
         artifacts: list[Artifact],
         audit_logs: list[AuditLog],
         media_assets: list[MediaAsset] | None = None,
+        visual_evidence: list[dict[str, Any]] | None = None,
     ) -> bytes:
         """Render publication-grade forensic report as PDF binary with ReportLab."""
         from reportlab.lib import colors
@@ -691,7 +867,14 @@ class ReportExporter:
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.lib.units import inch
         from reportlab.pdfgen import canvas
-        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        from reportlab.platypus import (
+            Image as ReportLabImage,
+            Paragraph,
+            SimpleDocTemplate,
+            Spacer,
+            Table,
+            TableStyle,
+        )
 
         media_assets = media_assets or []
         events = sorted(events, key=lambda e: (e.start_seconds if e.start_seconds is not None else 0.0))
@@ -983,7 +1166,70 @@ class ReportExporter:
         story.append(Spacer(1, 10))
 
         story.append(
-            Paragraph("3. Incident Video Clips & Chain of Custody", h2_style)
+            Paragraph("3. Forensic Visual Evidence & Key Incident Frames", h2_style)
+        )
+
+        visual_evidence = visual_evidence or getattr(report, "visual_evidence", []) or []
+        if not visual_evidence:
+            story.append(
+                Paragraph("<i>No visual evidence frames selected for this report.</i>", small_style)
+            )
+            story.append(Spacer(1, 8))
+        else:
+            for item in visual_evidence[:3]:
+                # Attempt to render image if physical file exists
+                img_path = _uri_to_local_path(item.get("storage_uri", ""))
+                if not img_path or not img_path.is_file():
+                    img_path = _uri_to_local_path(item.get("original_storage_uri", ""))
+
+                if img_path and img_path.is_file():
+                    try:
+                        from PIL import Image as PILImage
+                        with PILImage.open(img_path) as pimg:
+                            iw, ih = pimg.size
+                        max_w = 5.2 * inch
+                        max_h = 2.6 * inch
+                        scale = min(max_w / iw, max_h / ih, 1.0)
+                        story.append(ReportLabImage(str(img_path), width=iw * scale, height=ih * scale))
+                        story.append(Spacer(1, 4))
+                    except Exception as img_exc:
+                        logger.warning("Could not embed image in PDF: %s", img_exc)
+
+                cap_text = item.get("caption", "Salient incident visual evidence.")
+                story.append(Paragraph(f"<b>Caption:</b> {html.escape(cap_text)}", body_style))
+
+                tags = item.get("tags", [])
+                tags_str = ", ".join(tags) if tags else "None"
+                ents = item.get("resolved_entity_ids", [])
+                ents_str = ", ".join(ents) if ents else "None"
+                cam_label = item.get("camera_label") or item.get("camera_id") or "Surveillance Feed"
+                t_sec = item.get("timestamp_seconds")
+                t_str = f"{t_sec:.1f}s" if t_sec is not None else "N/A"
+                art_id = item.get("artifact_id", "N/A")
+                ann_id = item.get("annotated_artifact_id")
+
+                ref_info = f"Artifact: <code>{html.escape(art_id)}</code>"
+                if ann_id:
+                    ref_info += f" &bull; Annotated: <code>{html.escape(ann_id)}</code>"
+
+                story.append(
+                    Paragraph(
+                        f"<b>Tags:</b> {html.escape(tags_str)} | <b>Entities:</b> {html.escape(ents_str)} | <b>Context:</b> {html.escape(cam_label)} [{t_str}] | {ref_info}",
+                        small_style,
+                    )
+                )
+
+                if item.get("has_overlay"):
+                    story.append(
+                        Paragraph(
+                            "<font color='#d97706'><i>&bull; Model-generated overlay: Bounding boxes and labels are AI-generated and require forensic verification.</i></font>",
+                            small_style,
+                        )
+                    )
+                story.append(Spacer(1, 8))
+
+        story.append(
+            Paragraph("4. Incident Video Clips & Chain of Custody", h2_style)
         )
         clip_artifacts = [
             a
@@ -1042,7 +1288,7 @@ class ReportExporter:
 
         story.append(
             Paragraph(
-                "4. Investigator Audit Trail & Review Decisions", h2_style
+                "5. Investigator Audit Trail & Review Decisions", h2_style
             )
         )
         audit_data = [
