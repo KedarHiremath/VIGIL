@@ -16,6 +16,7 @@ from vigil.config import config
 from vigil.domain.artifact import Artifact
 from vigil.domain.audit import AuditLog
 from vigil.domain.coverage import CoverageRecord
+from vigil.domain.entity import Entity
 from vigil.domain.event import Event
 from vigil.domain.event_link import EventLink
 from vigil.domain.evidence_assessment import EvidenceAssessment
@@ -392,6 +393,18 @@ class InvestigationService:
     def get_investigation(self, investigation_id: str) -> Investigation:
         """Fetch investigation domain object."""
         return self.repository.get_investigation(investigation_id)
+
+    def get_entities(self, investigation_id: str) -> list[Entity]:
+        """Fetch all entities linked to observations in an investigation."""
+        obs = self.get_observations(investigation_id)
+        scoped_obs_ids = {o.observation_id for o in obs}
+        if not scoped_obs_ids:
+            return []
+        all_entities = self.repository.list_entities()
+        return [
+            e for e in all_entities
+            if any(oid in scoped_obs_ids for oid in e.associated_observation_ids)
+        ]
 
     def get_observations(self, investigation_id: str) -> list[Observation]:
         """Fetch all observations recorded for an investigation."""
@@ -814,6 +827,7 @@ class InvestigationService:
         all_assets = {m.media_asset_id: m for m in self.repository.list_media_assets()}
         media_assets = [all_assets[mid] for mid in inv.media_asset_ids if mid in all_assets]
 
+        entities = self.get_entities(investigation_id)
         return ReportExporter.export_html(
             investigation=inv,
             report=report,
@@ -825,6 +839,7 @@ class InvestigationService:
             audit_logs=audit_logs,
             media_assets=media_assets,
             base_url=base_url,
+            entities=entities,
         )
 
     def export_report_pdf(
@@ -847,6 +862,7 @@ class InvestigationService:
         all_assets = {m.media_asset_id: m for m in self.repository.list_media_assets()}
         media_assets = [all_assets[mid] for mid in inv.media_asset_ids if mid in all_assets]
 
+        entities = self.get_entities(investigation_id)
         return ReportExporter.export_pdf(
             investigation=inv,
             report=report,
@@ -857,6 +873,7 @@ class InvestigationService:
             artifacts=artifacts,
             audit_logs=audit_logs,
             media_assets=media_assets,
+            entities=entities,
         )
 
     def get_artifact_content_path(self, artifact_id: str) -> Path | None:
@@ -904,6 +921,7 @@ class InvestigationService:
         all_assets = {m.media_asset_id: m for m in self.repository.list_media_assets()}
         media_assets = [all_assets[mid] for mid in inv.media_asset_ids if mid in all_assets]
 
+        entities = self.get_entities(investigation_id)
         return ReportExporter.export_markdown(
             investigation=inv,
             report=report,
@@ -914,6 +932,7 @@ class InvestigationService:
             artifacts=artifacts,
             audit_logs=audit_logs,
             media_assets=media_assets,
+            entities=entities,
         )
 
     def create_demo_investigation(self) -> tuple[Investigation, IngestionResult]:

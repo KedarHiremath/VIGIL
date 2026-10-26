@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 import uuid
 from typing import Any
 
@@ -21,13 +23,221 @@ def clean_vlm_text(text: str) -> str:
     if not text:
         return ""
     cleaned = text.strip()
-    if cleaned.startswith("```json"):
-        cleaned = cleaned[len("```json"):].strip()
-    elif cleaned.startswith("```"):
-        cleaned = cleaned[len("```"):].strip()
-    if cleaned.endswith("```"):
-        cleaned = cleaned[:-3].strip()
+    if "```" in cleaned:
+        fence_match = re.search(r"```(?:json|markdown)?\s*([\s\S]*?)\s*```", cleaned)
+        if fence_match:
+            return fence_match.group(1).strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[len("```json"):].strip()
+        elif cleaned.startswith("```"):
+            cleaned = cleaned[len("```"):].strip()
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].strip()
     return cleaned
+
+
+def normalize_observation_description(text: str) -> str:
+    """Normalize raw model outputs into a clean, concise, grammatical forensic description.
+
+    Idempotent: An already-clean human-readable description remains completely unchanged.
+    Removes raw JSON wrappers, markdown code fences, unescaped characters, and model boilerplate.
+    Preserves camera context prefix, timestamps, and verifiable evidence.
+    """
+    if not text or not str(text).strip():
+        return ""
+    cleaned = str(text).strip()
+
+    # Extract camera context prefix if present, e.g. "[cam-north: North Gate] "
+    cam_prefix = ""
+    cam_match = re.match(r"^(\[[^\]]+\])\s*", cleaned)
+    if cam_match:
+        cam_prefix = cam_match.group(1) + " "
+        cleaned = cleaned[cam_match.end():].strip()
+
+    # Unwrap markdown fences
+    if "```" in cleaned:
+        cleaned = clean_vlm_text(cleaned)
+
+    # If the text is JSON or contains JSON structure, parse it
+    if (cleaned.startswith("{") and cleaned.endswith("}")) or (cleaned.startswith("[") and cleaned.endswith("]")) or ("{" in cleaned and "}" in cleaned):
+        try:
+            json_str = cleaned
+            if not (cleaned.startswith("{") or cleaned.startswith("[")):
+                start_obj = cleaned.find("{")
+                start_arr = cleaned.find("[")
+                start_candidates = [idx for idx in (start_obj, start_arr) if idx != -1]
+                if start_candidates:
+                    start_idx = min(start_candidates)
+                    end_idx = max(cleaned.rfind("}"), cleaned.rfind("]"))
+                    if end_idx > start_idx:
+                        json_str = cleaned[start_idx : end_idx + 1]
+
+            parsed = json.loads(json_str)
+            if isinstance(parsed, dict):
+                if parsed.get("description"):
+                    cleaned = str(parsed["description"])
+                elif parsed.get("observations") and isinstance(parsed["observations"], list):
+                    items = []
+                    for itm in parsed["observations"]:
+                        if isinstance(itm, dict):
+                            desc_part = itm.get("description") or itm.get("finding") or itm.get("label")
+                            if desc_part:
+                                items.append(str(desc_part).strip())
+                        elif isinstance(itm, str):
+                            items.append(itm.strip())
+                    if items:
+                        cleaned = " ".join(items)
+                elif parsed.get("scene") or parsed.get("summary"):
+                    cleaned = str(parsed.get("scene") or parsed.get("summary"))
+                elif parsed.get("label") or parsed.get("finding"):
+                    cleaned = str(parsed.get("label") or parsed.get("finding"))
+                else:
+                    parts = [f"{k}: {v}" for k, v in parsed.items() if v and isinstance(v, (str, int, float))]
+                    if parts:
+                        cleaned = "; ".join(parts)
+            elif isinstance(parsed, list):
+                items = []
+                for itm in parsed:
+                    if isinstance(itm, dict):
+                        d = itm.get("description") or itm.get("label")
+                        if d:
+                            items.append(str(d).strip())
+                    elif isinstance(itm, str):
+                        items.append(itm.strip())
+                if items:
+                    cleaned = " ".join(items)
+        except Exception:
+            pass
+
+    # Clean escaped characters
+    cleaned = cleaned.replace('\\"', '"').replace('\\n', ' ').replace('\\r', '')
+
+    # Remove AI / VLM boilerplate phrases (case-insensitive)
+    boilerplate_patterns = [
+        r"^(?:based on (?:the )?(?:visual|image|frame|surveillance|provided)[^,:\.\n]*[,:\.\n]\s*)",
+        r"^(?:in this (?:surveillance )?(?:frame|image|scene|video)[^,:\.\n]*[,:\.\n]\s*)",
+        r"^(?:the (?:provided )?(?:surveillance )?(?:video )?(?:footage|image|frame|scene) (?:shows|depicts|displays|reveals|contains)\s*)",
+        r"^(?:here is the (?:visual |forensic )?analysis[^,:\.\n]*[,:\.\n]\s*)",
+        r"^(?:we can observe that\s*)",
+        r"^(?:it appears that\s*)",
+    ]
+    for pat in boilerplate_patterns:
+        cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+
+    # Clean redundant JSON / syntax remnants
+    cleaned = re.sub(r"[\{\}\[\]]", "", cleaned)
+    cleaned = re.sub(r'^\s*["\']\s*', "", cleaned)
+    cleaned = re.sub(r'\s*["\']\s*$', "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    # Capitalize the first character
+    if cleaned:
+        cleaned = cleaned[0].upper() + cleaned[1:]
+
+    # Fallback if text is empty or meaningless
+    if not cleaned or len(cleaned) < 3 or set(cleaned).issubset(set(".,;:-_ '\"")):
+        cleaned = "Visual features observed in frame."
+
+    return f"{cam_prefix}{cleaned}"
+
+
+def parse_vlm_detection_response(raw_content: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Parse VLM output into structured observation items and candidate entity descriptors.
+
+    Robustly handles markdown fences, embedded JSON, top-level entities, and free-text narratives.
+    """
+    if not raw_content or not raw_content.strip():
+        return [], []
+
+    cleaned = clean_vlm_text(raw_content)
+    parsed: Any = None
+
+    try:
+        parsed = json.loads(cleaned)
+    except Exception:
+        start_obj = cleaned.find("{")
+        start_arr = cleaned.find("[")
+        start_candidates = [idx for idx in (start_obj, start_arr) if idx != -1]
+        if start_candidates:
+            start_idx = min(start_candidates)
+            end_idx = max(cleaned.rfind("}"), cleaned.rfind("]"))
+            if end_idx > start_idx:
+                try:
+                    parsed = json.loads(cleaned[start_idx : end_idx + 1])
+                except Exception:
+                    parsed = None
+
+    observations_data: list[dict[str, Any]] = []
+    entities_data: list[dict[str, Any]] = []
+
+    if isinstance(parsed, dict):
+        if "observations" in parsed:
+            raw_obs = parsed["observations"]
+            if isinstance(raw_obs, list):
+                observations_data = [item for item in raw_obs if isinstance(item, dict)]
+            elif isinstance(raw_obs, dict):
+                observations_data = [raw_obs]
+        elif "findings" in parsed and isinstance(parsed["findings"], list):
+            observations_data = [item for item in parsed["findings"] if isinstance(item, dict)]
+        elif "detections" in parsed and isinstance(parsed["detections"], list):
+            observations_data = [item for item in parsed["detections"] if isinstance(item, dict)]
+        elif "description" in parsed:
+            observations_data = [parsed]
+
+        top_entities = parsed.get("entities")
+        if isinstance(top_entities, list):
+            for e in top_entities:
+                if isinstance(e, dict):
+                    entities_data.append(e)
+                elif isinstance(e, str) and e.strip():
+                    entities_data.append({"label": e.strip(), "entity_type": "object"})
+        elif isinstance(parsed.get("entity"), (dict, str)):
+            e = parsed["entity"]
+            entities_data.append(e if isinstance(e, dict) else {"label": str(e), "entity_type": "object"})
+
+    elif isinstance(parsed, list):
+        observations_data = [item for item in parsed if isinstance(item, dict)]
+
+    for obs_item in observations_data:
+        ent = obs_item.get("entity")
+        if ent and isinstance(ent, (dict, str)):
+            entities_data.append(ent if isinstance(ent, dict) else {"label": str(ent), "entity_type": "object"})
+        ents = obs_item.get("entities")
+        if isinstance(ents, list):
+            for e in ents:
+                if isinstance(e, (dict, str)):
+                    entities_data.append(e if isinstance(e, dict) else {"label": str(e), "entity_type": "object"})
+
+    if not observations_data and raw_content.strip():
+        norm_desc = normalize_observation_description(raw_content)
+        observations_data = [
+            {
+                "observation_type": "visual_detection",
+                "description": norm_desc,
+                "confidence": 0.85,
+            }
+        ]
+        lower_desc = norm_desc.lower()
+        if any(w in lower_desc for w in ("person", "man", "woman", "individual", "pedestrian", "suspect")):
+            entities_data.append({
+                "entity_type": "person",
+                "label": "Person-1",
+                "attributes": {"detection_source": "visual_narrative"},
+            })
+        if any(w in lower_desc for w in ("car", "vehicle", "sedan", "truck", "suv", "van", "motorcycle")):
+            entities_data.append({
+                "entity_type": "vehicle",
+                "label": "Vehicle-1",
+                "attributes": {"detection_source": "visual_narrative"},
+            })
+        if any(w in lower_desc for w in ("dog", "cat", "animal", "bird")):
+            entities_data.append({
+                "entity_type": "animal",
+                "label": "Animal-1",
+                "attributes": {"detection_source": "visual_narrative"},
+            })
+
+    return observations_data, entities_data
 
 
 _GENERIC_ENTITY_LABELS: frozenset[str] = frozenset({
@@ -60,7 +270,7 @@ def _is_specific_label(label: str | None, entity_type: str) -> bool:
 
 def resolve_or_create_entity(
     repository: Any,
-    entity_info: dict[str, Any],
+    entity_info: dict[str, Any] | str,
     obs_id: str,
     active_entities: dict[str, Entity],
 ) -> Entity:
@@ -74,7 +284,31 @@ def resolve_or_create_entity(
     4. Preserve unresolved entities when uncertain.
     5. Safely merge attributes and update associated_observation_ids without duplicates.
     """
-    raw_type = str(entity_info.get("entity_type", "person")).strip().lower()
+    if isinstance(entity_info, str):
+        raw_str = entity_info.strip()
+        lower_str = raw_str.lower()
+        if any(w in lower_str for w in ("car", "vehicle", "truck", "sedan", "van", "motorcycle", "bike")):
+            e_type = "vehicle"
+        elif any(w in lower_str for w in ("person", "man", "woman", "individual", "pedestrian", "suspect")):
+            e_type = "person"
+        elif any(w in lower_str for w in ("dog", "cat", "animal", "bird")):
+            e_type = "animal"
+        else:
+            e_type = "object"
+        entity_info = {"entity_type": e_type, "label": raw_str, "attributes": {"description": raw_str}}
+
+    raw_type = str(
+        entity_info.get("entity_type")
+        or entity_info.get("category")
+        or entity_info.get("type")
+        or "person"
+    ).strip().lower()
+    # Normalize common synonyms
+    if raw_type in {"human", "pedestrian", "man", "woman", "suspect", "individual"}:
+        raw_type = "person"
+    elif raw_type in {"car", "truck", "motorcycle", "automobile", "bus", "van", "sedan"}:
+        raw_type = "vehicle"
+
     valid_types = {"person", "vehicle", "animal", "object", "unknown"}
     entity_type = raw_type if raw_type in valid_types else "unknown"
 
@@ -82,10 +316,14 @@ def resolve_or_create_entity(
     attributes: dict[str, Any] = (
         dict(raw_attributes) if isinstance(raw_attributes, dict) else {}
     )
-    # Sanitize attributes according to Entity schema (non-blank keys, finite values)
+    # Sanitize attributes according to Entity schema (non-blank keys, finite values, stringified nested data)
     clean_attributes: dict[str, Any] = {}
     for k, v in attributes.items():
         if isinstance(k, str) and k.strip():
+            if isinstance(v, (dict, list)):
+                v = json.dumps(v)
+            elif isinstance(v, float) and not math.isfinite(v):
+                continue
             clean_attributes[k.strip()] = v
 
     candidate_label = str(entity_info.get("label", "")).strip() or None
@@ -389,25 +627,8 @@ class VisualDetectorWorker(BaseToolWorker):
                     )
                     raw_content = ""
 
-            # Parse findings
-            observations_data: list[dict[str, Any]] = []
-            if raw_content:
-                try:
-                    cleaned_raw = clean_vlm_text(raw_content)
-                    parsed = json.loads(cleaned_raw)
-                    if isinstance(parsed, dict) and "observations" in parsed:
-                        observations_data = parsed["observations"]
-                    elif isinstance(parsed, list):
-                        observations_data = parsed
-                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-                    observations_data = [
-                        {
-                            "observation_type": "visual_detection",
-                            "description": clean_vlm_text(raw_content[:200])
-                            or "Visual features detected in frame.",
-                            "confidence": 0.85,
-                        }
-                    ]
+            # Parse findings and candidate entities
+            observations_data, frame_entities = parse_vlm_detection_response(raw_content)
 
             if not observations_data:
                 observations_data = [
@@ -421,12 +642,13 @@ class VisualDetectorWorker(BaseToolWorker):
             for obs_item in observations_data:
                 obs_id = f"obs-vis-{uuid.uuid4().hex[:8]}"
                 obs_type = str(obs_item.get("observation_type", "visual_detection"))
-                raw_desc = clean_vlm_text(str(obs_item.get("description", "Salient visual detection.")))
+                raw_desc = str(obs_item.get("description", "Salient visual detection."))
+                clean_desc = normalize_observation_description(raw_desc)
                 # Prepend camera context if not already present
-                if cam_label and cam_label not in raw_desc:
-                    desc = f"{cam_label} {raw_desc}"
+                if cam_label and cam_label not in clean_desc:
+                    desc = f"{cam_label} {clean_desc}"
                 else:
-                    desc = raw_desc
+                    desc = clean_desc
 
                 confidence = float(obs_item.get("confidence", 0.90))
                 confidence = min(max(confidence, 0.0), 1.0)
@@ -453,14 +675,21 @@ class VisualDetectorWorker(BaseToolWorker):
                 self.repository.add_observation(obs)
                 output_observation_ids.append(obs_id)
 
-                # Process optional entity with conservative resolution
-                entity_info = obs_item.get("entity")
-                if isinstance(entity_info, dict):
-                    resolve_or_create_entity(
-                        repository=self.repository,
-                        entity_info=entity_info,
-                        obs_id=obs_id,
-                        active_entities=active_entities,
-                    )
+                # Process all candidate entities linked to this observation and frame
+                item_entities: list[dict[str, Any] | str] = []
+                if obs_item.get("entity"):
+                    item_entities.append(obs_item["entity"])
+                if isinstance(obs_item.get("entities"), list):
+                    item_entities.extend(obs_item["entities"])
+                item_entities.extend(frame_entities)
+
+                for ent_info in item_entities:
+                    if isinstance(ent_info, (dict, str)):
+                        resolve_or_create_entity(
+                            repository=self.repository,
+                            entity_info=ent_info,
+                            obs_id=obs_id,
+                            active_entities=active_entities,
+                        )
 
         return output_observation_ids

@@ -9,6 +9,7 @@ from vigil.domain.report import Report
 from vigil.orchestration.task_types import TaskRequest
 from vigil.storage.repository import EntityNotFoundError
 from vigil.tools.base import BaseToolWorker
+from vigil.tools.visual_detector import normalize_observation_description
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,20 @@ class ReportGeneratorWorker(BaseToolWorker):
             )
         events_context = "\n".join(events_summary_lines) if events_summary_lines else "No discrete correlated events."
 
+        # Scoped entities context
+        all_entities = self.repository.list_entities()
+        scoped_entities = [
+            e for e in all_entities
+            if any(oid in set(obs_ids) for oid in e.associated_observation_ids)
+        ]
+        entities_summary_lines: list[str] = []
+        for ent in scoped_entities[:20]:
+            attrs_str = ", ".join(f"{k}: {v}" for k, v in ent.attributes.items() if v)
+            entities_summary_lines.append(
+                f"- Entity #{ent.entity_id} [{ent.entity_type.upper()}]: Label '{ent.label or 'Unlabeled'}' | Attributes: {attrs_str or 'None'} | Linked Obs: {len(ent.associated_observation_ids)}"
+            )
+        entities_context = "\n".join(entities_summary_lines) if entities_summary_lines else "No entities reliably identified."
+
         obs_summary_lines: list[str] = []
         for o in observations[:25]:
             sr = o.source_references[0] if o.source_references else None
@@ -132,8 +147,9 @@ class ReportGeneratorWorker(BaseToolWorker):
                 t_str = f"[{_format_timecode(sr.start_seconds)} - {_format_timecode(sr.end_seconds)}]"
             elif sr and sr.start_seconds is not None:
                 t_str = f"[{sr.start_seconds:.1f}s]"
+            clean_desc = normalize_observation_description(o.description)
             obs_summary_lines.append(
-                f"- {t_str} Modality: {o.modality} | Finding: {o.observation_type} | Conf: {o.confidence or 0.85:.2f} | {o.description}"
+                f"- {t_str} Modality: {o.modality} | Finding: {o.observation_type} | Conf: {o.confidence or 0.85:.2f} | {clean_desc}"
             )
         obs_context = "\n".join(obs_summary_lines) if obs_summary_lines else "No observations recorded."
 
@@ -158,6 +174,7 @@ class ReportGeneratorWorker(BaseToolWorker):
             f"- Evidence Assessments count: {len(assessment_ids)}\n"
             f"- Coverage Records count: {len(coverage_ids)}\n\n"
             f"CHRONOLOGICAL EVENT TIMELINE (ACROSS PREMISE FEEDS):\n{events_context}\n\n"
+            f"DETECTED FORENSIC ENTITIES:\n{entities_context}\n\n"
             f"OBSERVATIONAL EVIDENCE:\n{obs_context}\n\n"
             f"EVIDENCE ASSESSMENTS:\n{assessments_context}\n\n"
             "INSTRUCTIONS:\n"

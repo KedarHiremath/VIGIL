@@ -15,12 +15,14 @@ from urllib.request import url2pathname
 from vigil.domain.artifact import Artifact
 from vigil.domain.audit import AuditLog
 from vigil.domain.coverage import CoverageRecord
+from vigil.domain.entity import Entity
 from vigil.domain.event import Event
 from vigil.domain.evidence_assessment import EvidenceAssessment
 from vigil.domain.investigation import Investigation
 from vigil.domain.media_asset import MediaAsset
 from vigil.domain.observation import Observation
 from vigil.domain.report import Report
+from vigil.tools.visual_detector import normalize_observation_description
 
 
 def _uri_to_local_path(uri: str) -> Path | None:
@@ -71,6 +73,55 @@ def _clean_rationale(text: str) -> str:
     return " ".join(lines) if lines else text.strip()
 
 
+def _format_entity_summary(
+    entity: Entity,
+    observations: list[Observation],
+) -> dict[str, Any]:
+    """Compile evidence-grounded summary fields for a detected entity."""
+    linked_obs = [
+        o for o in observations
+        if o.observation_id in set(entity.associated_observation_ids)
+    ]
+    first_time: float | None = None
+    cam_refs: list[str] = []
+    art_refs: list[str] = []
+    confs: list[float] = []
+
+    for o in linked_obs:
+        if o.confidence is not None:
+            confs.append(o.confidence)
+        for sr in o.source_references:
+            if sr.start_seconds is not None:
+                if first_time is None or sr.start_seconds < first_time:
+                    first_time = sr.start_seconds
+            if sr.media_asset_id and sr.media_asset_id not in cam_refs:
+                cam_refs.append(sr.media_asset_id)
+        for aid in o.artifact_ids:
+            if aid not in art_refs:
+                art_refs.append(aid)
+
+    clean_attrs = [f"{k}: {v}" for k, v in entity.attributes.items() if v]
+    attrs_str = "; ".join(clean_attrs) if clean_attrs else "None recorded"
+
+    avg_conf = (sum(confs) / len(confs)) if confs else None
+    conf_str = f"{avg_conf:.0%}" if avg_conf is not None else "Unspecified"
+    time_str = f"{_format_timecode(first_time)} ({first_time:.1f}s)" if first_time is not None else "N/A"
+    cam_str = ", ".join(cam_refs) if cam_refs else "Surveillance feed"
+
+    return {
+        "entity_id": entity.entity_id,
+        "category": entity.entity_type.title(),
+        "label": entity.label or entity.entity_id,
+        "attributes": attrs_str,
+        "first_observed": f"{time_str} [{cam_str}]",
+        "first_seconds": first_time,
+        "camera_ref": cam_str,
+        "observations": [o.observation_id for o in linked_obs],
+        "artifact_ids": art_refs,
+        "confidence_str": conf_str,
+    }
+
+
 class ReportExporter:
     """Exports structured VIGIL forensic reports into interactive HTML and publication-ready PDF formats."""
 
@@ -87,6 +138,7 @@ class ReportExporter:
         media_assets: list[MediaAsset] | None = None,
         base_url: str = "",
         visual_evidence: list[dict[str, Any]] | None = None,
+        entities: list[Entity] | None = None,
     ) -> str:
         """Render complete forensic report as a standalone responsive HTML document with embedded incident clips."""
         media_assets = media_assets or []
@@ -575,7 +627,7 @@ class ReportExporter:
                 tag_html = "".join(f'<span class="tag-badge">#{html.escape(t)}</span>' for t in item.get("tags", []))
 
                 ents = item.get("resolved_entity_ids", [])
-                ents_html = ", ".join(f"<code>{html.escape(e)}</code>" for e in ents) if ents else "None"
+                ents_html = ", ".join(f"<code>{html.escape(e)}</code>" for e in ents) if ents else '<span style="color:var(--text-muted); font-style:italic;">None identified in frame</span>'
 
                 cam_name = item.get("camera_label") or item.get("camera_id") or "Surveillance Feed"
                 t_sec = item.get("timestamp_seconds")
@@ -627,7 +679,49 @@ class ReportExporter:
   </section>
 
   <section class="report-section">
-    <h2>4. Evidence Assessments &amp; Certainty</h2>
+    <h2>4. Detected Entities &amp; Tracked Forensic Assets</h2>
+    """
+        entities = entities or []
+        if not entities:
+            doc += """<p style="color: var(--text-muted); font-style: italic;">No entities could be reliably identified in the selected frames.</p>"""
+        else:
+            doc += """
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Entity ID</th>
+          <th>Category</th>
+          <th>Label / Identifier</th>
+          <th>Distinguishing Attributes</th>
+          <th>First Observed (Context)</th>
+          <th>Supporting Evidence</th>
+        </tr>
+      </thead>
+      <tbody>
+"""
+            for ent in entities:
+                summary = _format_entity_summary(ent, observations)
+                obs_html = ", ".join(f"<code>{html.escape(oid)}</code>" for oid in summary["observations"][:4]) or "None"
+                doc += f"""
+        <tr>
+          <td><code>{html.escape(ent.entity_id)}</code></td>
+          <td><span class="status-pill status-confirmed">{html.escape(summary["category"])}</span></td>
+          <td><strong>{html.escape(summary["label"])}</strong></td>
+          <td>{html.escape(summary["attributes"])}</td>
+          <td>{html.escape(summary["first_observed"])}</td>
+          <td>{obs_html}</td>
+        </tr>
+"""
+            doc += """
+      </tbody>
+    </table>
+"""
+
+        doc += """
+  </section>
+
+  <section class="report-section">
+    <h2>5. Evidence Assessments &amp; Certainty</h2>
     <table class="data-table">
       <thead>
         <tr>
@@ -663,7 +757,7 @@ class ReportExporter:
   </section>
 
   <section class="report-section">
-    <h2>5. Investigator Audit Trail &amp; Chain of Custody Log</h2>
+    <h2>6. Investigator Audit Trail &amp; Chain of Custody Log</h2>
     <table class="data-table">
       <thead>
         <tr>
@@ -725,6 +819,7 @@ class ReportExporter:
         audit_logs: list[AuditLog],
         media_assets: list[MediaAsset] | None = None,
         visual_evidence: list[dict[str, Any]] | None = None,
+        entities: list[Entity] | None = None,
     ) -> str:
         """Render complete forensic report as a structured, timestamp-indexed Markdown document."""
         media_assets = media_assets or []
@@ -802,7 +897,8 @@ class ReportExporter:
                 t_str = f"`{_format_timecode(t_sec)}` ({t_sec:.1f}s)" if t_sec is not None else "N/A"
                 cap_clean = str(item.get("caption", "Salient visual evidence.")).replace("|", "-")
                 tags_str = ", ".join(item.get("tags", [])) or "None"
-                ents_str = ", ".join(f"`{e}`" for e in item.get("resolved_entity_ids", [])) or "None"
+                resolved_ents = item.get("resolved_entity_ids", [])
+                ents_str = ", ".join(f"`{e}`" for e in resolved_ents) if resolved_ents else "None identified in frame"
                 overlay_str = "`AI OVERLAY`" if item.get("has_overlay") else "`UNANNOTATED`"
                 md.append(f"| {aid_ref} | {cam_name} ({t_str}) | {cap_clean} | {tags_str} | {ents_str} | {overlay_str} |")
             md.append("")
@@ -817,7 +913,7 @@ class ReportExporter:
                 t_str = f"{t_sec:.1f}s" if t_sec is not None else "N/A"
                 md.append(f"- **Timeline & Camera:** {cam_name} [{t_str}]")
                 md.append(f"- **Descriptive Tags:** {', '.join(item.get('tags', [])) or 'None'}")
-                md.append(f"- **Resolved Entities:** {', '.join(item.get('resolved_entity_ids', [])) or 'None'}")
+                md.append(f"- **Resolved Entities:** {', '.join(f'`{e}`' for e in item.get('resolved_entity_ids', [])) or 'None identified in frame'}")
                 if ann_aid:
                     md.append(f"- **Annotated Derivative:** `{ann_aid}` ({item.get('storage_uri', 'N/A')})")
                 md.append(f"- **Original Evidence Ref:** `{orig_aid}` ({item.get('original_storage_uri', 'N/A')})")
@@ -825,7 +921,40 @@ class ReportExporter:
                     md.append("- *Note: Model-generated bounding boxes and labels are AI-generated and require human verification.*")
                 md.append("")
 
-        md.append("## 4. Evidence Assessments & Certainty\n")
+        entities = entities or []
+        md.append("## 4. Detected Entities & Forensic Tracked Assets\n")
+        if not entities:
+            md.append("*No entities could be reliably identified in the selected frames.*\n")
+        else:
+            md.append("| Entity ID | Category | Label / Identifier | Distinguishing Attributes | First Seen (Timestamp & Camera) | Supporting Observations |")
+            md.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
+            for ent in entities:
+                summary = _format_entity_summary(ent, observations)
+                eid = f"`{ent.entity_id}`"
+                cat = f"**{summary['category']}**"
+                lbl = summary["label"].replace("|", "-")
+                att = summary["attributes"].replace("|", "-")
+                t_ctx = summary["first_observed"].replace("|", "-")
+                obs_refs = ", ".join(f"`{oid}`" for oid in summary["observations"][:3]) or "None"
+                md.append(f"| {eid} | {cat} | {lbl} | {att} | {t_ctx} | {obs_refs} |")
+            md.append("")
+
+            for ent in entities:
+                summary = _format_entity_summary(ent, observations)
+                md.append(f"### #{ent.entity_id} • {summary['category']} ({summary['label']})")
+                md.append(f"- **Category:** {summary['category']}")
+                md.append(f"- **Label / Reference:** {summary['label']}")
+                md.append(f"- **Distinguishing Attributes:** {summary['attributes']}")
+                md.append(f"- **First Observed:** {summary['first_observed']}")
+                md.append(f"- **Confidence:** {summary['confidence_str']}")
+                obs_list = ", ".join(f"`{oid}`" for oid in summary["observations"]) or "None"
+                md.append(f"- **Supporting Observations:** {obs_list}")
+                if summary["artifact_ids"]:
+                    art_list = ", ".join(f"`{aid}`" for aid in summary["artifact_ids"][:5])
+                    md.append(f"- **Associated Frame Artifacts:** {art_list}")
+                md.append("")
+
+        md.append("## 5. Evidence Assessments & Certainty\n")
         if not assessments:
             md.append("*No formal evidence assessments recorded.*\n")
         else:
@@ -836,7 +965,7 @@ class ReportExporter:
                 md.append(f"| `{ass.assessment_id}` | `{ass.target_type}:{ass.target_id}` | {ass.assessment_type.replace('_', ' ').title()} | **{ass.rating.upper()}** | {clean_rat} | {ass.assessed_by} |")
             md.append("")
 
-        md.append("## 5. Investigator Audit Log\n")
+        md.append("## 6. Investigator Audit Log\n")
         if not audit_logs:
             md.append("*No human review actions or audit logs recorded.*\n")
         else:
@@ -860,6 +989,7 @@ class ReportExporter:
         audit_logs: list[AuditLog],
         media_assets: list[MediaAsset] | None = None,
         visual_evidence: list[dict[str, Any]] | None = None,
+        entities: list[Entity] | None = None,
     ) -> bytes:
         """Render publication-grade forensic report as PDF binary with ReportLab."""
         from reportlab.lib import colors
@@ -1201,7 +1331,7 @@ class ReportExporter:
                 tags = item.get("tags", [])
                 tags_str = ", ".join(tags) if tags else "None"
                 ents = item.get("resolved_entity_ids", [])
-                ents_str = ", ".join(ents) if ents else "None"
+                ents_str = ", ".join(ents) if ents else "None identified in frame"
                 cam_label = item.get("camera_label") or item.get("camera_id") or "Surveillance Feed"
                 t_sec = item.get("timestamp_seconds")
                 t_str = f"{t_sec:.1f}s" if t_sec is not None else "N/A"
@@ -1228,8 +1358,54 @@ class ReportExporter:
                     )
                 story.append(Spacer(1, 8))
 
+        # Detected Entities Section
+        entities = entities or []
         story.append(
-            Paragraph("4. Incident Video Clips & Chain of Custody", h2_style)
+            Paragraph("4. Detected Entities & Tracked Forensic Assets", h2_style)
+        )
+        if not entities:
+            story.append(
+                Paragraph("<i>No entities could be reliably identified in the selected frames.</i>", small_style)
+            )
+            story.append(Spacer(1, 8))
+        else:
+            entity_data = [
+                [
+                    Paragraph("Entity ID", table_head_style),
+                    Paragraph("Category", table_head_style),
+                    Paragraph("Label / Identifier", table_head_style),
+                    Paragraph("Distinguishing Attributes", table_head_style),
+                    Paragraph("Timeline Context", table_head_style),
+                ]
+            ]
+            for ent in entities:
+                summary = _format_entity_summary(ent, observations)
+                entity_data.append([
+                    Paragraph(f"<code>{html.escape(ent.entity_id)}</code>", small_style),
+                    Paragraph(html.escape(summary["category"]), small_style),
+                    Paragraph(f"<b>{html.escape(summary['label'])}</b>", small_style),
+                    Paragraph(html.escape(summary["attributes"]), small_style),
+                    Paragraph(html.escape(summary["first_observed"]), small_style),
+                ])
+
+            ent_table = Table(
+                entity_data,
+                colWidths=[1.3 * inch, 1.0 * inch, 1.4 * inch, 1.8 * inch, 1.6 * inch],
+                repeatRows=1,
+            )
+            ent_table.setStyle(
+                TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e293b")),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ])
+            )
+            story.append(ent_table)
+            story.append(Spacer(1, 10))
+
+        story.append(
+            Paragraph("5. Incident Video Clips & Chain of Custody", h2_style)
         )
         clip_artifacts = [
             a
@@ -1288,7 +1464,7 @@ class ReportExporter:
 
         story.append(
             Paragraph(
-                "5. Investigator Audit Trail & Review Decisions", h2_style
+                "6. Investigator Audit Trail & Review Decisions", h2_style
             )
         )
         audit_data = [

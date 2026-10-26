@@ -35,6 +35,7 @@ from vigil.api.schemas import (
     ReportFinalizeResponse,
 )
 from vigil.domain.artifact import Artifact
+from vigil.domain.entity import Entity
 from vigil.domain.audit import AuditLog
 from vigil.domain.coverage import CoverageRecord
 from vigil.domain.event import Event
@@ -518,6 +519,29 @@ def get_investigation_details(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Investigation '{investigation_id}' not found.",
         ) from exc
+
+
+@router.get(
+    "/{investigation_id}/entities",
+    response_model=list[Entity],
+    summary="List all entities resolved for an investigation",
+)
+def get_investigation_entities(
+    investigation_id: str,
+    service: Annotated[
+        InvestigationService,
+        Depends(get_investigation_service),
+    ] = None,  # type: ignore[assignment]
+) -> list[Entity]:
+    """Retrieve all detected and tracked entities scoped to this investigation."""
+    try:
+        service.get_investigation(investigation_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Investigation '{investigation_id}' not found.",
+        ) from exc
+    return service.get_entities(investigation_id)
 
 
 @router.get(

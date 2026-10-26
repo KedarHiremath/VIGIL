@@ -21,7 +21,7 @@ from vigil.models.base import BaseLLMClient
 from vigil.services.exporter import _uri_to_local_path
 from vigil.storage.repository import InvestigationRepository
 from vigil.tools.base import generate_sha256
-from vigil.tools.visual_detector import clean_vlm_text
+from vigil.tools.visual_detector import clean_vlm_text, normalize_observation_description, resolve_or_create_entity
 
 logger = logging.getLogger(__name__)
 
@@ -322,9 +322,28 @@ class VisualEvidenceAnnotator:
                     exc,
                 )
 
+        # Normalize visual caption
+        caption = normalize_observation_description(caption)
+
         # Build and validate BoundingBox models
         validated_boxes: list[BoundingBox] = []
         resolved_entity_ids: list[str] = []
+
+        # Find existing observations linked to this frame artifact
+        art_obs = [
+            o for o in self.repository.list_observations()
+            if artifact.artifact_id in o.artifact_ids
+        ]
+        art_obs_ids = {o.observation_id for o in art_obs}
+
+        # Retrieve investigation entities previously resolved for this frame's observations
+        frame_entities: list[Entity] = [
+            ent for ent in investigation_entities
+            if any(oid in art_obs_ids for oid in ent.associated_observation_ids)
+        ]
+        for fe in frame_entities:
+            if fe.entity_id not in resolved_entity_ids:
+                resolved_entity_ids.append(fe.entity_id)
 
         # Index known investigation entities by label for resolution linking
         entity_by_label: dict[str, Entity] = {}
@@ -349,15 +368,42 @@ class VisualEvidenceAnnotator:
             else:
                 confidence = None
 
-            # Attempt entity resolution linking
+            # Attempt entity resolution linking:
+            # 1. Match against entities already established for this frame
             matched_ent_id: str | None = None
-            if label.lower() in entity_by_label:
-                matched_ent_id = entity_by_label[label.lower()].entity_id
-                if matched_ent_id not in resolved_entity_ids:
-                    resolved_entity_ids.append(matched_ent_id)
+            for fe in frame_entities:
+                if fe.label and fe.label.strip().lower() == label.lower():
+                    matched_ent_id = fe.entity_id
+                    break
+                if fe.entity_type == category:
+                    matched_ent_id = fe.entity_id
+                    break
 
+            # 2. Match against investigation-wide entities by specific label
+            if not matched_ent_id and label.lower() in entity_by_label:
+                matched_ent_id = entity_by_label[label.lower()].entity_id
+
+            # 3. Create or resolve candidate entity if valid category provided
             raw_attr = det.get("attributes", {})
             attr = dict(raw_attr) if isinstance(raw_attr, dict) else {}
+
+            if not matched_ent_id and category in {"person", "vehicle", "animal", "object"}:
+                obs_ref = art_obs[0].observation_id if art_obs else f"obs-vis-{uuid.uuid4().hex[:8]}"
+                active_dict = {e.entity_id: e for e in investigation_entities}
+                new_ent = resolve_or_create_entity(
+                    repository=self.repository,
+                    entity_info={
+                        "entity_type": category,
+                        "label": label,
+                        "attributes": attr,
+                    },
+                    obs_id=obs_ref,
+                    active_entities=active_dict,
+                )
+                matched_ent_id = new_ent.entity_id
+
+            if matched_ent_id and matched_ent_id not in resolved_entity_ids:
+                resolved_entity_ids.append(matched_ent_id)
 
             bbox = BoundingBox(
                 x_min=valid_coords[0],
@@ -372,6 +418,11 @@ class VisualEvidenceAnnotator:
                 valid=True,
             )
             validated_boxes.append(bbox)
+
+        # Enrich tags with verified frame entity types
+        for fe in frame_entities:
+            if fe.entity_type and fe.entity_type not in tags:
+                tags.append(fe.entity_type)
 
         # Draw derivative annotated image if local file exists and boxes are valid
         annotated_art_id: str | None = None

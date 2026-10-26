@@ -32,6 +32,8 @@
     currentMediaSource: "video", // "video" or "artifact"
     seenTelemetryKeys: new Set(),
     createdObjectUrls: [],
+    notifiedReports: { ready: new Set(), failed: new Set(), empty: new Set() },
+    pollTimer: null,
   };
 
   // DOM Elements
@@ -228,8 +230,11 @@
   // API Fetch Utility
   // -------------------------------------------------------------------------
   async function apiFetch(endpoint, options = {}) {
+    const silent = Boolean(options && options.silent);
+    const fetchOptions = { ...options };
+    delete fetchOptions.silent;
     try {
-      const res = await fetch(endpoint, options);
+      const res = await fetch(endpoint, fetchOptions);
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({ detail: res.statusText }));
         throw new Error(errJson.detail || `Request failed with status ${res.status}`);
@@ -237,7 +242,9 @@
       return await res.json();
     } catch (err) {
       console.error(`API Error on ${endpoint}:`, err);
-      showToast(err.message, "error");
+      if (!silent) {
+        showToast(err.message, "error");
+      }
       throw err;
     }
   }
@@ -488,6 +495,7 @@
       if (state.activeInvestigationId !== invId) return; // Prevent race condition
       state.status = statusData;
       updateCaseStatus(statusData.status);
+      handleReportNotifications(invId, statusData);
 
       // 2. Full investigation details
       const invData = await apiFetch(`/api/v1/investigations/${invId}`);
@@ -873,6 +881,65 @@
   });
 
   // -------------------------------------------------------------------------
+
+  // -------------------------------------------------------------------------
+  // Report Readiness Lifecycle & Deduplication
+  // -------------------------------------------------------------------------
+  function handleReportNotifications(invId, statusData) {
+    if (!invId || !statusData) return;
+    const s = (statusData.status || "").toLowerCase();
+    const hasReport = Boolean(statusData.has_report);
+
+    if (hasReport) {
+      if (!state.notifiedReports.ready.has(invId)) {
+        state.notifiedReports.ready.add(invId);
+        showToast("Forensic report is ready and available for review.", "success");
+      }
+    } else if (s === "completed") {
+      if (!state.notifiedReports.empty.has(invId)) {
+        state.notifiedReports.empty.add(invId);
+        showToast("Investigation completed, but no report was generated.", "warning");
+      }
+    } else if (s === "failed") {
+      if (!state.notifiedReports.failed.has(invId)) {
+        state.notifiedReports.failed.add(invId);
+        showToast(`Investigation failed: ${statusData.error || "Execution error"}`, "error");
+      }
+    }
+  }
+
+  function scheduleStatusPolling() {
+    if (state.pollTimer) return;
+    state.pollTimer = setInterval(async () => {
+      if (!state.activeInvestigationId) {
+        clearInterval(state.pollTimer);
+        state.pollTimer = null;
+        return;
+      }
+      const s = (state.status?.status || "").toLowerCase();
+      if (s === "completed" || s === "failed") {
+        clearInterval(state.pollTimer);
+        state.pollTimer = null;
+        return;
+      }
+      // If WebSocket is active, let WS drive real-time telemetry
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        return;
+      }
+      try {
+        const statusData = await apiFetch(`/api/v1/investigations/${state.activeInvestigationId}/status`, { silent: true });
+        if (statusData) {
+          handleReportNotifications(state.activeInvestigationId, statusData);
+          if (state.status && (statusData.status !== state.status.status || statusData.has_report !== state.status.has_report || statusData.completed_tasks !== state.status.completed_tasks)) {
+            refreshActiveCase();
+          }
+        }
+      } catch (e) {
+        // Silent catch for background polling
+      }
+    }, 4000);
+  }
+
   // WebSocket Telemetry Connection
   // -------------------------------------------------------------------------
   function connectWebSocket(invId) {
@@ -913,6 +980,7 @@
       clearInterval(ws._pingInterval);
       el.wsLabel.textContent = "WS: DISCONNECTED";
       el.wsIndicator.className = "ws-pill ws-disconnected";
+      scheduleStatusPolling();
     };
 
     ws.onerror = (err) => {
@@ -928,13 +996,28 @@
     addTelemetryLog(msg);
     activateAgentChip(msg);
 
+    if (msg.event_type === "investigation_completed") {
+      handleReportNotifications(state.activeInvestigationId, {
+        status: "completed",
+        has_report: Boolean(msg.data?.report_id || true)
+      });
+    } else if (msg.event_type === "investigation_failed" || (msg.event_type === "task_failed" && msg.data?.fatal)) {
+      handleReportNotifications(state.activeInvestigationId, {
+        status: "failed",
+        has_report: false,
+        error: msg.data?.error || "Task failure"
+      });
+    }
+
     if (
       msg.event_type === "state_changed" ||
       msg.event_type === "observation_detected" ||
       msg.event_type === "event_correlated" ||
       msg.event_type === "event_reviewed" ||
       msg.event_type === "report_finalized" ||
-      msg.event_type === "investigation_completed"
+      msg.event_type === "investigation_completed" ||
+      msg.event_type === "investigation_failed" ||
+      msg.event_type === "task_failed"
     ) {
       refreshActiveCase();
     }
@@ -1591,10 +1674,34 @@
   function cleanObservationDesc(desc) {
     if (!desc) return "";
     let clean = desc.trim();
-    if (clean.startsWith("```json")) clean = clean.substring(7);
-    if (clean.startsWith("```")) clean = clean.substring(3);
-    if (clean.endsWith("```")) clean = clean.substring(0, clean.length - 3);
-    return clean.trim();
+    if (clean.includes("```")) {
+      clean = clean.replace(/```(?:json|markdown)?\s*([\s\S]*?)\s*```/g, "$1").trim();
+    }
+    if ((clean.startsWith("{") && clean.endsWith("}")) || (clean.startsWith("[") && clean.endsWith("]"))) {
+      try {
+        const parsed = JSON.parse(clean);
+        if (typeof parsed === "object" && parsed !== null) {
+          if (parsed.description) {
+            clean = parsed.description;
+          } else if (Array.isArray(parsed.observations) && parsed.observations.length > 0) {
+            clean = parsed.observations.map(o => o.description || o.label || JSON.stringify(o)).join(" ");
+          } else if (parsed.scene || parsed.summary) {
+            clean = parsed.scene || parsed.summary;
+          }
+        }
+      } catch (e) {
+        // Continue with text cleaning
+      }
+    }
+    clean = clean.replace(/^(?:based on the (?:visual|image|frame|surveillance evidence|provided image)[^,:]*[,:]\s*)/i, "");
+    clean = clean.replace(/^(?:in this (?:surveillance )?(?:frame|image|scene|video)[^,:]*[,:]\s*)/i, "");
+    clean = clean.replace(/^(?:the (?:provided )?(?:image|frame|surveillance video|footage) (?:shows|depicts|displays|reveals|contains)\s*)/i, "");
+    clean = clean.replace(/^(?:here is the (?:visual |forensic )?analysis[^,:]*[,:]\s*)/i, "");
+    clean = clean.replace(/\\"/g, '"').replace(/\\n/g, " ").replace(/\s+/g, " ").trim();
+    if (clean.length > 0) {
+      clean = clean.charAt(0).toUpperCase() + clean.slice(1);
+    }
+    return clean || "Visual features observed in frame.";
   }
 
   function cleanRationaleText(text) {
@@ -1780,8 +1887,29 @@
       return;
     }
 
+    const currentStatus = (state.status?.status || "").toLowerCase();
+    const hasReport = Boolean(state.status?.has_report);
+
+    // If report is not ready yet, display neutral progress or terminal message without calling /report
+    if (!hasReport) {
+      if (currentStatus === "running" || currentStatus === "created") {
+        el.reportPreviewBox.innerHTML = `<div class="gallery-empty" style="color:var(--text-muted);"><span class="spinner" style="display:inline-block; margin-right:8px; vertical-align:middle;"></span>Investigation in progress. Structured deliverable report will be available upon completion.</div>`;
+        return;
+      }
+      if (currentStatus === "completed") {
+        el.reportPreviewBox.innerHTML = `<div class="gallery-empty" style="color:#f87171;">Investigation completed, but no final report was persisted.</div>`;
+        return;
+      }
+      if (currentStatus === "failed") {
+        el.reportPreviewBox.innerHTML = `<div class="gallery-empty" style="color:#f87171;">Investigation failed: ${escapeHtml(state.status?.error || "Task failure")}</div>`;
+        return;
+      }
+      el.reportPreviewBox.innerHTML = `<div class="gallery-empty">Investigation still in progress or no report generated yet.</div>`;
+      return;
+    }
+
     try {
-      const report = await apiFetch(`/api/v1/investigations/${state.activeInvestigationId}/report`);
+      const report = await apiFetch(`/api/v1/investigations/${state.activeInvestigationId}/report`, { silent: true });
       el.reportPreviewBox.innerHTML = `
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
           <h4 style="color:#93c5fd; margin:0;">${escapeHtml(report.title)}</h4>
@@ -1805,8 +1933,8 @@
       document.getElementById("quickExportHtmlBtn")?.addEventListener("click", () => {
         window.open(`/api/v1/investigations/${state.activeInvestigationId}/export/html`, "_blank");
       });
-    } catch {
-      el.reportPreviewBox.innerHTML = `<div class="gallery-empty">Investigation still in progress or no report generated yet.</div>`;
+    } catch (err) {
+      el.reportPreviewBox.innerHTML = `<div class="gallery-empty">Unable to load report findings (${escapeHtml(err.message)}).</div>`;
     }
   }
 
@@ -2131,7 +2259,7 @@
       // Switch to this new investigation
       await loadInvestigations(inv.investigation_id, true);
     } catch (err) {
-      showToast(err.message, "error");
+        showToast(err.message, "error");
     } finally {
       el.startInvBtn.disabled = false;
       el.uploadSpinner.classList.add("hidden");
