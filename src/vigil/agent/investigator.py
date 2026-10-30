@@ -1,4 +1,4 @@
-﻿"""Agentic Orchestrator and Lead Investigator coordinating multi-phase video forensics."""
+"""Agentic Orchestrator and Lead Investigator coordinating multi-phase video forensics."""
 
 import logging
 from collections.abc import Callable
@@ -314,7 +314,13 @@ class AgenticOrchestrator:
                 # Non-fatal failure: reset investigation state from FAILED back to RUNNING
                 # so that subsequent tasks can still execute.
                 if state.status == InvestigationStatus.FAILED:
-                    state = transition_state(state, InvestigationStatus.RUNNING)
+                    state = state.model_copy(
+                        update={
+                            "status": InvestigationStatus.RUNNING,
+                            "completed_at": None,
+                            "updated_at": datetime.now(UTC),
+                        }
+                    )
                     self.repository.save_state(state)
 
         # If all tasks succeeded or yielded partial results, complete the investigation

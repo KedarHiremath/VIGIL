@@ -1,9 +1,13 @@
 """Investigation planning and adaptive task generation."""
 
+from __future__ import annotations
+
+import math
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from vigil.config import config
 from vigil.domain.investigation import Investigation
 from vigil.models.base import BaseLLMClient
 from vigil.orchestration.task_types import TaskRequest
@@ -34,14 +38,41 @@ class PlannedTask:
 class InvestigationPlanner:
     """Decomposes an investigation objective and scope into structured forensic tasks."""
 
-    def __init__(self, llm_client: BaseLLMClient | None = None) -> None:
+    def __init__(
+        self,
+        llm_client: BaseLLMClient | None = None,
+        repository: Any | None = None,
+    ) -> None:
         self.llm = llm_client
+        self.repository = repository
 
     def plan_investigation(self, investigation: Investigation) -> list[PlannedTask]:
         """Construct the initial multi-phase forensic investigation plan."""
         inv_id = investigation.investigation_id
         media_refs = list(investigation.media_asset_ids)
         media_count = len(media_refs)
+
+        # Derive max_frames and max_frames_per_task from asset duration
+        sample_interval = 2.0
+        max_analysis_cap = getattr(config, "max_analysis_frames", 100)
+        total_duration = 0.0
+
+        if self.repository is not None:
+            for mid in media_refs:
+                try:
+                    asset = self.repository.get_media_asset(mid)
+                    if asset.duration_seconds and asset.duration_seconds > 0:
+                        total_duration += asset.duration_seconds
+                except Exception:
+                    pass
+
+        if total_duration > 0:
+            calc_frames = int(math.ceil(total_duration / sample_interval))
+            derived_max_frames = min(max_analysis_cap, max(8, calc_frames))
+        else:
+            derived_max_frames = min(max_analysis_cap, max(8, media_count * 8))
+
+        derived_frames_per_task = derived_max_frames
 
         tasks: list[PlannedTask] = []
 
@@ -54,8 +85,8 @@ class InvestigationPlanner:
                 input_refs=media_refs,
                 parameters={
                     "investigation_id": inv_id,
-                    "sample_interval_seconds": 2.0,
-                    "max_frames": 8,
+                    "sample_interval_seconds": sample_interval,
+                    "max_frames": derived_max_frames,
                 },
             )
         )
@@ -64,12 +95,12 @@ class InvestigationPlanner:
         tasks.append(
             PlannedTask(
                 task_type="visual_analysis",
-                description=f"Analyze extracted frame artifacts across premise feeds for persons, vehicles, objects, and anomalies",
+                description="Analyze extracted frame artifacts across premise feeds for persons, vehicles, objects, and anomalies",
                 input_refs=[],  # Dynamically resolved by worker or updated by agent
                 parameters={
                     "investigation_id": inv_id,
                     "detect_entities": True,
-                    "max_frames_per_task": max(8, media_count * 4),
+                    "max_frames_per_task": derived_frames_per_task,
                 },
             )
         )
@@ -78,7 +109,7 @@ class InvestigationPlanner:
         tasks.append(
             PlannedTask(
                 task_type="audio_transcription",
-                description=f"Transcribe audio tracks and detect acoustic trigger events across feeds",
+                description="Transcribe audio tracks and detect acoustic trigger events across feeds",
                 input_refs=media_refs,
                 parameters={
                     "investigation_id": inv_id,

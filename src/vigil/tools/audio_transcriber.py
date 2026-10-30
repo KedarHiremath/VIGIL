@@ -164,7 +164,27 @@ class AudioTranscriberWorker(BaseToolWorker):
 
             # 2. Case: No audio artifact found (silent video or no audio track)
             if audio_artifact is None:
-                duration = asset.duration_seconds if asset and asset.duration_seconds else 10.0
+                duration = asset.duration_seconds if asset and asset.duration_seconds else None
+                if duration is None or duration <= 0:
+                    max_art_sec = max(
+                        [
+                            a.source_reference.end_seconds
+                            for a in self.repository.list_artifacts()
+                            if a.source_reference
+                            and a.source_reference.media_asset_id == (asset.media_asset_id if asset else ref_id)
+                            and a.source_reference.end_seconds is not None
+                        ],
+                        default=None,
+                    )
+                    duration = max_art_sec
+
+                if duration is None or duration <= 0:
+                    logger.warning(
+                        "AudioTranscriberWorker: media asset '%s' has unknown duration and no audio track; skipping observation.",
+                        ref_id,
+                    )
+                    continue
+
                 obs_id = f"obs-aud-{uuid.uuid4().hex[:8]}"
                 source_ref = SourceReference(
                     media_asset_id=asset.media_asset_id if asset else ref_id,
@@ -201,7 +221,21 @@ class AudioTranscriberWorker(BaseToolWorker):
                 dsp_info = _analyze_audio_signal(wav_path)
 
             events = dsp_info.get("events", [])
-            duration = dsp_info.get("duration", asset.duration_seconds if asset else 10.0)
+            wav_duration = dsp_info.get("duration")
+            if not wav_duration or wav_duration <= 0:
+                if audio_artifact.source_reference and audio_artifact.source_reference.end_seconds:
+                    wav_duration = audio_artifact.source_reference.end_seconds
+                elif asset and asset.duration_seconds:
+                    wav_duration = asset.duration_seconds
+                else:
+                    wav_duration = None
+
+            if wav_duration is None or wav_duration <= 0:
+                raise ValueError(
+                    f"Cannot determine duration for audio artifact '{audio_artifact.artifact_id}'."
+                )
+
+            duration = wav_duration
             mean_rms = dsp_info.get("mean_rms", 0.0)
             max_rms = dsp_info.get("max_rms", 0.0)
 
@@ -278,4 +312,3 @@ class AudioTranscriberWorker(BaseToolWorker):
             output_observation_ids.append(obs_id)
 
         return output_observation_ids
-

@@ -109,17 +109,27 @@ class ClipSlicerWorker(BaseToolWorker):
             media_id = all_assets[0].media_asset_id
 
         media_asset = self.repository.get_media_asset(media_id)
-        asset_duration = media_asset.duration_seconds or 60.0
+        asset_duration = media_asset.duration_seconds
 
         if start_t is None:
             start_t = 0.0
+
         if end_t is None:
-            end_t = min(start_t + 5.0, asset_duration)
+            if asset_duration is not None:
+                end_t = min(start_t + 5.0, asset_duration)
+            else:
+                raise ValueError(
+                    f"Cannot determine clip boundaries: media asset '{media_id}' has unknown duration and no end timestamp was specified."
+                )
 
         start_t = max(0.0, start_t)
-        end_t = min(end_t, asset_duration)
+        if asset_duration is not None:
+            end_t = min(end_t, asset_duration)
         if end_t <= start_t:
-            end_t = min(start_t + 1.0, asset_duration)
+            if asset_duration is not None:
+                end_t = min(start_t + 1.0, asset_duration)
+            else:
+                end_t = start_t + 1.0
 
         padding = float(request.parameters.get("padding_seconds", 0.0))
         output_dir = request.parameters.get("output_dir")

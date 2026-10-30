@@ -9,6 +9,7 @@ import re
 import uuid
 from typing import Any
 
+from vigil.domain.artifact import Artifact
 from vigil.domain.entity import Entity
 from vigil.domain.observation import Observation
 from vigil.domain.provenance import Provenance
@@ -34,6 +35,33 @@ def clean_vlm_text(text: str) -> str:
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3].strip()
     return cleaned
+
+
+def parse_confidence(val: Any, default: float = 0.90) -> float:
+    """Safely parse qualitative, string, or numeric confidence values into a float in [0.0, 1.0]."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        if math.isfinite(val):
+            return min(max(float(val), 0.0), 1.0)
+        return default
+    if isinstance(val, str):
+        v = val.strip().lower().rstrip("%")
+        if v in {"high", "very high", "very_high", "strong"}:
+            return 0.90
+        if v in {"medium", "moderate"}:
+            return 0.75
+        if v in {"low", "very low", "very_low", "weak"}:
+            return 0.50
+        try:
+            num = float(v)
+            if math.isfinite(num):
+                if num > 1.0 and num <= 100.0:
+                    num = num / 100.0
+                return min(max(num, 0.0), 1.0)
+        except ValueError:
+            pass
+    return default
 
 
 def normalize_observation_description(text: str) -> str:
@@ -443,6 +471,43 @@ def resolve_or_create_entity(
 class VisualDetectorWorker(BaseToolWorker):
     """Analyzes image/frame artifacts using vision models to produce Observations and Entities."""
 
+    @staticmethod
+    def _select_evenly_spaced_artifacts(
+        artifacts: list[Artifact],
+        limit: int,
+    ) -> list[str]:
+        """Sort artifacts chronologically and select evenly spaced items across the timeline."""
+        if not artifacts or limit <= 0:
+            return []
+        sorted_arts = sorted(
+            artifacts,
+            key=lambda a: (
+                a.source_reference.start_seconds
+                if a.source_reference and a.source_reference.start_seconds is not None
+                else 0.0
+            ),
+        )
+        if len(sorted_arts) <= limit:
+            return [a.artifact_id for a in sorted_arts]
+        if limit == 1:
+            return [sorted_arts[0].artifact_id]
+
+        step = (len(sorted_arts) - 1) / (limit - 1)
+        indices = [int(round(i * step)) for i in range(limit)]
+        selected: list[str] = []
+        seen: set[int] = set()
+        for idx in indices:
+            if idx not in seen and 0 <= idx < len(sorted_arts):
+                seen.add(idx)
+                selected.append(sorted_arts[idx].artifact_id)
+        if len(selected) < limit:
+            for a in sorted_arts:
+                if a.artifact_id not in selected:
+                    selected.append(a.artifact_id)
+                    if len(selected) == limit:
+                        break
+        return selected
+
     def run(self, request: TaskRequest) -> list[str]:
         artifact_ids = list(request.input_refs)
         investigation_id = request.parameters.get("investigation_id")
@@ -490,10 +555,28 @@ class VisualDetectorWorker(BaseToolWorker):
             per_media_limit = max(2, max_frames_per_task // len(media_groups))
             balanced_ids: list[str] = []
             for m_aids in media_groups.values():
-                balanced_ids.extend(m_aids[:per_media_limit])
+                m_arts: list[Artifact] = []
+                for aid in m_aids:
+                    try:
+                        m_arts.append(self.repository.get_artifact(aid))
+                    except Exception:
+                        pass
+                if m_arts:
+                    balanced_ids.extend(self._select_evenly_spaced_artifacts(m_arts, per_media_limit))
+                else:
+                    balanced_ids.extend(m_aids[:per_media_limit])
             artifact_ids = balanced_ids
         else:
-            artifact_ids = artifact_ids[:max_frames_per_task]
+            all_arts_list: list[Artifact] = []
+            for aid in artifact_ids:
+                try:
+                    all_arts_list.append(self.repository.get_artifact(aid))
+                except Exception:
+                    pass
+            if all_arts_list:
+                artifact_ids = self._select_evenly_spaced_artifacts(all_arts_list, max_frames_per_task)
+            else:
+                artifact_ids = artifact_ids[:max_frames_per_task]
 
         logger.info(
             "VisualDetectorWorker: analyzing %d frame(s) across %d media feed(s) for task %s",
@@ -566,16 +649,14 @@ class VisualDetectorWorker(BaseToolWorker):
                 elif asset.camera_id:
                     cam_label = f"[{asset.camera_id}]"
 
-            # ------------------------------------------------------------------
-            # Validate the artifact storage URI before dispatching to the VLM.
-            # Synthetic / mock URIs (e.g. file:///storage/artifacts/…) that do
-            # not resolve to a real file on disk cannot be base64-encoded and
-            # would cause the API call to fail. Skip them with a fallback
-            # observation so the rest of the queue is unaffected.
-            # ------------------------------------------------------------------
+            # Validate storage URI
             uri = artifact.storage_uri
             _is_resolvable = False
-            if uri.startswith("http://") or uri.startswith("https://"):
+            # Mock LLM operates without physical files
+            is_mock_llm = type(self.llm).__name__ == "MockLLMClient"
+            if is_mock_llm:
+                _is_resolvable = True
+            elif uri.startswith("http://") or uri.startswith("https://"):
                 _is_resolvable = True
             else:
                 from pathlib import Path as _Path
@@ -592,10 +673,15 @@ class VisualDetectorWorker(BaseToolWorker):
                 except Exception:
                     _is_resolvable = False
 
+            analysis_status = "analyzed"
+            failure_reason = ""
+
             if not _is_resolvable:
+                analysis_status = "failed"
+                failure_reason = f"Unresolvable storage URI '{uri}'"
                 logger.warning(
                     "VisualDetectorWorker: artifact %s has unresolvable storage URI '%s'; "
-                    "skipping VLM call and recording placeholder observation.",
+                    "recording analysis_failed observation.",
                     art_id,
                     uri,
                 )
@@ -619,25 +705,36 @@ class VisualDetectorWorker(BaseToolWorker):
                     )
                     raw_content = response.content
                 except Exception as exc:  # noqa: BLE001
+                    analysis_status = "failed"
+                    failure_reason = f"VLM call failed: {exc}"
                     logger.warning(
                         "VisualDetectorWorker: frame %s VLM call failed (%s); "
-                        "recording fallback observation — other frames will continue.",
+                        "recording analysis_failed observation.",
                         art_id,
                         exc,
                     )
                     raw_content = ""
 
-            # Parse findings and candidate entities
-            observations_data, frame_entities = parse_vlm_detection_response(raw_content)
-
-            if not observations_data:
+            # Distinguish outcomes: analyzed-with-findings, analyzed-clean, analysis_failed
+            if analysis_status == "failed":
                 observations_data = [
                     {
-                        "observation_type": "scene_inspection",
-                        "description": "Visual inspection completed without salient detections.",
-                        "confidence": 0.80,
+                        "observation_type": "analysis_failed",
+                        "description": f"Visual inspection failed: {failure_reason}",
+                        "confidence": 0.0,
                     }
                 ]
+                frame_entities = []
+            else:
+                observations_data, frame_entities = parse_vlm_detection_response(raw_content)
+                if not observations_data:
+                    observations_data = [
+                        {
+                            "observation_type": "scene_inspection",
+                            "description": "Visual inspection completed without salient detections.",
+                            "confidence": 0.80,
+                        }
+                    ]
 
             for obs_item in observations_data:
                 obs_id = f"obs-vis-{uuid.uuid4().hex[:8]}"
@@ -650,14 +747,17 @@ class VisualDetectorWorker(BaseToolWorker):
                 else:
                     desc = clean_desc
 
-                confidence = float(obs_item.get("confidence", 0.90))
-                confidence = min(max(confidence, 0.0), 1.0)
+                confidence = parse_confidence(
+                    obs_item.get("confidence"),
+                    default=0.90 if obs_type != "analysis_failed" else 0.0,
+                )
 
+                method_str = "visual_detection_failed" if obs_type == "analysis_failed" else "visual_detection"
                 provenance = Provenance(
                     producer_type="vision_model",
                     producer_name=getattr(self.llm, "model_name", "vision_model")
                     or "vision_model",
-                    method="visual_detection",
+                    method=method_str,
                     input_artifact_ids=[artifact.artifact_id],
                 )
 
@@ -675,21 +775,22 @@ class VisualDetectorWorker(BaseToolWorker):
                 self.repository.add_observation(obs)
                 output_observation_ids.append(obs_id)
 
-                # Process all candidate entities linked to this observation and frame
-                item_entities: list[dict[str, Any] | str] = []
-                if obs_item.get("entity"):
-                    item_entities.append(obs_item["entity"])
-                if isinstance(obs_item.get("entities"), list):
-                    item_entities.extend(obs_item["entities"])
-                item_entities.extend(frame_entities)
+                # Process candidate entities only for successful detections
+                if obs_type != "analysis_failed":
+                    item_entities: list[dict[str, Any] | str] = []
+                    if obs_item.get("entity"):
+                        item_entities.append(obs_item["entity"])
+                    if isinstance(obs_item.get("entities"), list):
+                        item_entities.extend(obs_item["entities"])
+                    item_entities.extend(frame_entities)
 
-                for ent_info in item_entities:
-                    if isinstance(ent_info, (dict, str)):
-                        resolve_or_create_entity(
-                            repository=self.repository,
-                            entity_info=ent_info,
-                            obs_id=obs_id,
-                            active_entities=active_entities,
-                        )
+                    for ent_info in item_entities:
+                        if isinstance(ent_info, (dict, str)):
+                            resolve_or_create_entity(
+                                repository=self.repository,
+                                entity_info=ent_info,
+                                obs_id=obs_id,
+                                active_entities=active_entities,
+                            )
 
         return output_observation_ids

@@ -59,6 +59,7 @@ class MediaIngestionService:
         output_artifacts_dir: str | Path | None = None,
         sample_interval_seconds: float = 2.0,
         max_frames: int = 50,
+        extract_frames: bool = True,
         extract_audio: bool = True,
     ) -> IngestionResult:
         """Ingest a physical media file, populate MediaAsset and Camera, extract JPEG frames & WAV audio, and store in repository."""
@@ -105,7 +106,7 @@ class MediaIngestionService:
         audio_artifacts: list[Artifact] = []
 
         # 5. Extract JPEG frames for visual detection
-        if metadata.has_video:
+        if metadata.has_video and extract_frames:
             extracted_frames = MediaDecoder.extract_frames(
                 file_path=path,
                 output_dir=art_dir / "frames",
@@ -115,9 +116,13 @@ class MediaIngestionService:
                 max_frames=max_frames,
             )
 
-            duration = metadata.duration_seconds or 10.0
+            has_valid_dur = metadata.duration_seconds is not None and metadata.duration_seconds > 0
             for ef in extracted_frames:
-                frame_end = min(ef.timestamp_seconds + sample_interval_seconds, duration)
+                if has_valid_dur:
+                    frame_end = min(ef.timestamp_seconds + sample_interval_seconds, metadata.duration_seconds)
+                else:
+                    frame_end = ef.timestamp_seconds + sample_interval_seconds
+
                 if frame_end <= ef.timestamp_seconds:
                     frame_end = ef.timestamp_seconds + 0.1
 

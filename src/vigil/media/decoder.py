@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import wave
 from dataclasses import dataclass
 from pathlib import Path
 
 import av
 import cv2
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -64,7 +67,11 @@ class MediaDecoder:
         max_frames: int = 100,
         jpeg_quality: int = 95,
     ) -> list[ExtractedFrame]:
-        """Decode video frames at intervals and write actual JPEG files to disk."""
+        """Decode video frames at intervals and write actual JPEG files to disk.
+
+        Spreads samples across [start, end] when the cap is reached instead of truncating the tail.
+        Seeks directly when start_seconds > 0.
+        """
         src_path = Path(file_path).resolve()
         if not src_path.is_file():
             raise FileNotFoundError(f"Media file does not exist: {src_path}")
@@ -73,6 +80,7 @@ class MediaDecoder:
         out_path.mkdir(parents=True, exist_ok=True)
 
         extracted: list[ExtractedFrame] = []
+        interval = max(0.001, sample_interval_seconds)
 
         # Attempt extraction via PyAV
         try:
@@ -88,17 +96,35 @@ class MediaDecoder:
                     if stream.duration is not None and stream.time_base
                     else None
                 )
-                total_duration = stream_duration or (
+                container_duration = (
                     float(container.duration) / float(av.time_base)
                     if container.duration
-                    else 3600.0
+                    else None
                 )
+                total_duration = stream_duration or container_duration
 
-                stop_at = (
-                    min(end_seconds, total_duration)
-                    if end_seconds is not None
-                    else total_duration
-                )
+                if end_seconds is not None:
+                    stop_at = min(end_seconds, total_duration) if total_duration is not None else end_seconds
+                else:
+                    stop_at = total_duration
+
+                # Adapt interval to spread frames across [start, end] if cap would be exceeded
+                if stop_at is not None and stop_at > start_seconds and max_frames > 0:
+                    timeline_span = stop_at - start_seconds
+                    expected_count = timeline_span / interval
+                    if expected_count > max_frames:
+                        interval = timeline_span / max_frames
+
+                # Seek directly to start timestamp if start_seconds > 0
+                if start_seconds > 0:
+                    try:
+                        seek_pts = int(start_seconds / time_base)
+                        container.seek(seek_pts, stream=stream, backward=True)
+                    except Exception as seek_exc:
+                        logger.debug("PyAV stream seek failed (%s); continuing from stream start.", seek_exc)
+
+                stream_start_pts = stream.start_time if stream.start_time is not None else 0
+                stream_start_sec = float(stream_start_pts * time_base)
 
                 next_target_t = max(0.0, start_seconds)
                 frame_idx = 0
@@ -108,18 +134,22 @@ class MediaDecoder:
                         break
 
                     pts = frame.pts
-                    current_t = float(pts * time_base) if pts is not None else (frame_idx * sample_interval_seconds)
+                    if pts is not None:
+                        current_t = float(pts * time_base) - stream_start_sec
+                    else:
+                        current_t = start_seconds + (frame_idx * interval)
 
                     if current_t < next_target_t:
                         continue
-                    if current_t > stop_at:
+                    if stop_at is not None and current_t > stop_at:
                         break
 
                     # Convert PyAV VideoFrame to numpy BGR for OpenCV JPEG encoding
                     img_bgr = frame.to_ndarray(format="bgr24")
                     h, w = img_bgr.shape[:2]
 
-                    file_name = f"frame_{frame_idx:04d}.jpg"
+                    # Filename embeds timestamp in milliseconds
+                    file_name = f"frame_{int(round(max(0.0, current_t) * 1000)):09d}.jpg"
                     jpeg_path = out_path / file_name
 
                     # Encode to JPEG
@@ -138,7 +168,7 @@ class MediaDecoder:
                     extracted.append(
                         ExtractedFrame(
                             frame_index=frame_idx,
-                            timestamp_seconds=round(current_t, 3),
+                            timestamp_seconds=round(max(0.0, current_t), 3),
                             file_path=str(jpeg_path),
                             storage_uri=jpeg_path.as_uri(),
                             sha256=sha256_sum,
@@ -148,30 +178,48 @@ class MediaDecoder:
                     )
 
                     frame_idx += 1
-                    next_target_t = current_t + sample_interval_seconds
+                    next_target_t = current_t + interval
 
             if extracted:
                 return extracted
-        except Exception:  # noqa: BLE001, S110
-            # Fallback to OpenCV VideoCapture
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "PyAV frame extraction failed for %s (%s); falling back to OpenCV VideoCapture.",
+                src_path,
+                exc,
+            )
+            extracted = []
 
         # OpenCV Fallback
+        extracted = []
         cap = cv2.VideoCapture(str(src_path))
         if not cap.isOpened():
             return []
 
         fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = total_frames / fps if fps > 0 else 0.0
+        duration = total_frames / fps if fps > 0 and total_frames > 0 else None
 
-        stop_t = min(end_seconds, duration) if end_seconds is not None else duration
+        if end_seconds is not None:
+            stop_t = min(end_seconds, duration) if duration is not None else end_seconds
+        else:
+            stop_t = duration
+
+        cv_interval = max(0.001, sample_interval_seconds)
+        if stop_t is not None and stop_t > start_seconds and max_frames > 0:
+            timeline_span = stop_t - start_seconds
+            if (timeline_span / cv_interval) > max_frames:
+                cv_interval = timeline_span / max_frames
+
         next_t = max(0.0, start_seconds)
         frame_idx = 0
 
         while frame_idx < max_frames:
+            if stop_t is not None and next_t > stop_t:
+                break
+
             target_frame_num = int(next_t * fps)
-            if target_frame_num >= total_frames > 0:
+            if total_frames > 0 and target_frame_num >= total_frames:
                 break
 
             cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame_num)
@@ -182,11 +230,11 @@ class MediaDecoder:
             actual_pos_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
             actual_t = actual_pos_msec / 1000.0 if actual_pos_msec > 0 else next_t
 
-            if actual_t > stop_t:
+            if stop_t is not None and actual_t > stop_t:
                 break
 
             h, w = img_bgr.shape[:2]
-            jpeg_path = out_path / f"frame_{frame_idx:04d}.jpg"
+            jpeg_path = out_path / f"frame_{int(round(max(0.0, actual_t) * 1000)):09d}.jpg"
             success, enc_buf = cv2.imencode(
                 ".jpg",
                 img_bgr,
@@ -200,7 +248,7 @@ class MediaDecoder:
                 extracted.append(
                     ExtractedFrame(
                         frame_index=frame_idx,
-                        timestamp_seconds=round(actual_t, 3),
+                        timestamp_seconds=round(max(0.0, actual_t), 3),
                         file_path=str(jpeg_path),
                         storage_uri=jpeg_path.as_uri(),
                         sha256=sha256_sum,
@@ -210,7 +258,7 @@ class MediaDecoder:
                 )
                 frame_idx += 1
 
-            next_t += sample_interval_seconds
+            next_t += cv_interval
 
         cap.release()
         return extracted

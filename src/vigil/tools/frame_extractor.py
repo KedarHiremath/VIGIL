@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 import uuid
 from pathlib import Path
@@ -13,6 +14,8 @@ from vigil.domain.source_reference import SourceReference
 from vigil.media.decoder import MediaDecoder
 from vigil.orchestration.task_types import TaskRequest
 from vigil.tools.base import BaseToolWorker, generate_sha256
+
+logger = logging.getLogger(__name__)
 
 
 def uri_to_file_path(uri: str) -> Path | None:
@@ -54,11 +57,47 @@ class FrameExtractorWorker(BaseToolWorker):
 
         for media_id in media_ids:
             media_asset = self.repository.get_media_asset(media_id)
-            duration = media_asset.duration_seconds or 30.0
+            duration = media_asset.duration_seconds
 
             start_t = float(request.parameters.get("start_seconds", 0.0))
-            end_t = float(request.parameters.get("end_seconds", duration))
-            end_t = min(end_t, duration)
+            end_param = request.parameters.get("end_seconds")
+            end_t = float(end_param) if end_param is not None else duration
+            if duration is not None and end_t is not None:
+                end_t = min(end_t, duration)
+
+            # Check if existing frame artifacts for this media asset already exist in the repository
+            existing_frames = [
+                a
+                for a in self.repository.list_artifacts()
+                if a.artifact_type == "frame"
+                and a.source_reference
+                and a.source_reference.media_asset_id == media_id
+            ]
+
+            if existing_frames:
+                # Sort chronologically by start_seconds
+                existing_frames.sort(
+                    key=lambda a: (
+                        a.source_reference.start_seconds
+                        if a.source_reference and a.source_reference.start_seconds is not None
+                        else 0.0
+                    )
+                )
+                matching = [
+                    a
+                    for a in existing_frames
+                    if a.source_reference
+                    and a.source_reference.start_seconds >= start_t
+                    and (end_t is None or a.source_reference.start_seconds <= end_t)
+                ]
+                if matching:
+                    logger.info(
+                        "FrameExtractorWorker: Reusing %d existing frame artifact(s) for media %s",
+                        min(len(matching), max_frames),
+                        media_id,
+                    )
+                    output_artifact_ids.extend(a.artifact_id for a in matching[:max_frames])
+                    continue
 
             # Check if physical video file exists
             physical_file = uri_to_file_path(media_asset.storage_uri)
@@ -77,7 +116,11 @@ class FrameExtractorWorker(BaseToolWorker):
                 )
 
                 for ef in extracted_frames:
-                    frame_end = min(ef.timestamp_seconds + frame_duration, duration)
+                    if duration is not None:
+                        frame_end = min(ef.timestamp_seconds + frame_duration, duration)
+                    else:
+                        frame_end = ef.timestamp_seconds + frame_duration
+
                     if frame_end <= ef.timestamp_seconds:
                         frame_end = ef.timestamp_seconds + 0.1
 
@@ -107,9 +150,14 @@ class FrameExtractorWorker(BaseToolWorker):
             # Fallback to synthetic artifact creation for mock URIs
             current_t = start_t
             frame_idx = 0
+            limit_t = end_t if end_t is not None else float("inf")
 
-            while current_t < end_t and frame_idx < max_frames:
-                frame_end = min(current_t + frame_duration, duration)
+            while current_t < limit_t and frame_idx < max_frames:
+                if duration is not None:
+                    frame_end = min(current_t + frame_duration, duration)
+                else:
+                    frame_end = current_t + frame_duration
+
                 if frame_end <= current_t:
                     frame_end = current_t + 0.1
 
