@@ -142,6 +142,14 @@ class EvidenceAssessorWorker(BaseToolWorker):
                 response = self.llm.generate_text(prompt=prompt, json_mode=True)
                 if response and response.content and response.content.strip():
                     raw = response.content.strip()
+                    if "```" in raw:
+                        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
+                        if fence_match:
+                            raw = fence_match.group(1).strip()
+                    if "{" in raw and "}" in raw:
+                        s_idx = raw.find("{")
+                        e_idx = raw.rfind("}")
+                        raw = raw[s_idx : e_idx + 1]
                     try:
                         parsed = json.loads(raw)
                         if isinstance(parsed, dict):

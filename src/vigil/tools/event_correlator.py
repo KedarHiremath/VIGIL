@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from vigil.domain.event import Event
 from vigil.domain.event_link import EventLink
+from vigil.domain.observation import Observation
 from vigil.orchestration.task_types import TaskRequest
 from vigil.tools.base import BaseToolWorker
 
@@ -23,6 +25,214 @@ def _format_timecode(seconds: float | None) -> str:
     mins = int(seconds // 60)
     secs = seconds % 60
     return f"{mins:02d}:{secs:05.2f}"
+
+
+def parse_correlator_response(raw_text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Parse events and links from LLM response safely, handling code fences and JSON wrappers."""
+    if not raw_text or not raw_text.strip():
+        return [], []
+
+    cleaned = raw_text.strip()
+    if "```" in cleaned:
+        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
+        if fence_match:
+            cleaned = fence_match.group(1).strip()
+        else:
+            cleaned = re.sub(r"^```[a-z]*\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+
+    # Find JSON boundaries
+    json_str = cleaned
+    if "{" in cleaned and "}" in cleaned:
+        start_idx = cleaned.find("{")
+        end_idx = cleaned.rfind("}")
+        json_str = cleaned[start_idx : end_idx + 1]
+    elif "[" in cleaned and "]" in cleaned:
+        start_idx = cleaned.find("[")
+        end_idx = cleaned.rfind("]")
+        json_str = cleaned[start_idx : end_idx + 1]
+
+    try:
+        parsed = json.loads(json_str)
+        if isinstance(parsed, dict):
+            evs = parsed.get("events", [])
+            links = parsed.get("links", [])
+            valid_events = [e for e in evs if isinstance(e, dict) and (e.get("description") or e.get("event_type"))]
+            valid_links = [l for l in links if isinstance(l, dict)]
+            return valid_events, valid_links
+        elif isinstance(parsed, list):
+            valid_events = [e for e in parsed if isinstance(e, dict) and (e.get("description") or e.get("event_type"))]
+            return valid_events, []
+    except Exception:
+        pass
+    return [], []
+
+
+def _cluster_fallback_events(
+    observations: list[Observation],
+    media_map: dict[str, Any],
+    camera_map: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Forensically cluster observations into discrete chronological events with synthesized evidence summaries.
+
+    Avoids monolithic single-event fallbacks or placeholder text.
+    """
+    if not observations:
+        return [], []
+
+    # 1. Filter out failed analyses if other valid observations exist
+    valid_obs = [
+        o for o in observations
+        if o.observation_type != "analysis_failed" and (o.confidence is None or o.confidence > 0.0)
+    ]
+    if not valid_obs:
+        valid_obs = observations
+
+    # 2. Sort observations chronologically
+    def _obs_start(o: Observation) -> float:
+        if o.source_references and o.source_references[0].start_seconds is not None:
+            return float(o.source_references[0].start_seconds)
+        return 0.0
+
+    valid_obs.sort(key=_obs_start)
+
+    # 3. Check if all observations are clean inspections
+    clean_count = sum(
+        1 for o in valid_obs
+        if "no salient" in o.description.lower() or "routine" in o.description.lower() or o.observation_type == "visual_inspection"
+    )
+    if clean_count == len(valid_obs):
+        # Entire timeline analyzed without incident
+        start_t = _obs_start(valid_obs[0])
+        end_t = (
+            valid_obs[-1].source_references[0].end_seconds
+            if valid_obs[-1].source_references and valid_obs[-1].source_references[0].end_seconds is not None
+            else start_t + 1.0
+        )
+        return [
+            {
+                "event_type": "routine_surveillance",
+                "description": f"Routine surveillance coverage maintained across sector ({_format_timecode(start_t)} - {_format_timecode(end_t)}); no security anomalies detected.",
+                "observation_ids": [o.observation_id for o in valid_obs],
+            }
+        ], []
+
+    # 4. Group into chronological clusters (gap > 8.0s triggers a new event)
+    clusters: list[list[Observation]] = []
+    current_cluster: list[Observation] = []
+    last_end = -1.0
+
+    for obs in valid_obs:
+        start_sec = _obs_start(obs)
+        end_sec = (
+            obs.source_references[0].end_seconds
+            if obs.source_references and obs.source_references[0].end_seconds is not None
+            else start_sec
+        )
+
+        if not current_cluster:
+            current_cluster.append(obs)
+            last_end = end_sec
+        else:
+            time_gap = start_sec - last_end
+            if time_gap > 8.0 or len(current_cluster) >= 15:
+                clusters.append(current_cluster)
+                current_cluster = [obs]
+                last_end = end_sec
+            else:
+                current_cluster.append(obs)
+                last_end = max(last_end, end_sec)
+
+    if current_cluster:
+        clusters.append(current_cluster)
+
+    # 5. Synthesize distinct forensic events for each cluster
+    events_data: list[dict[str, Any]] = []
+
+    for cluster in clusters:
+        cluster_oids = [o.observation_id for o in cluster]
+        c_start = _obs_start(cluster[0])
+        c_end = max(
+            (
+                o.source_references[0].end_seconds
+                if o.source_references and o.source_references[0].end_seconds is not None
+                else _obs_start(o)
+            )
+            for o in cluster
+        )
+
+        # Camera context
+        first_sr = cluster[0].source_references[0] if cluster[0].source_references else None
+        cam_label = ""
+        if first_sr and first_sr.media_asset_id in media_map:
+            asset = media_map[first_sr.media_asset_id]
+            if asset.camera_id and asset.camera_id in camera_map:
+                cam = camera_map[asset.camera_id]
+                cam_label = f"[{cam.location_label or cam.name or cam.camera_id}] "
+            elif asset.camera_id:
+                cam_label = f"[{asset.camera_id}] "
+
+        # Determine dominant type and salient descriptions
+        types_count: dict[str, int] = {}
+        salient_descs: list[str] = []
+
+        for o in cluster:
+            t = o.observation_type
+            types_count[t] = types_count.get(t, 0) + 1
+            d = o.description.strip()
+            # Clean camera prefixes from individual observation descriptions for synthesis
+            clean_d = re.sub(r"^\[[^\]]+\]\s*", "", d)
+            if "no salient" not in clean_d.lower() and clean_d not in salient_descs:
+                salient_descs.append(clean_d)
+
+        # Derive event_type
+        dominant_type = max(types_count.keys(), key=lambda k: types_count[k]) if types_count else "visual_detection"
+        if "person" in dominant_type:
+            event_type = "person_activity"
+        elif "vehicle" in dominant_type:
+            event_type = "vehicle_movement"
+        elif "acoustic" in dominant_type or "audio" in dominant_type:
+            event_type = "acoustic_incident"
+        elif "incident" in dominant_type or "intrusion" in dominant_type or "breach" in dominant_type:
+            event_type = dominant_type
+        else:
+            event_type = "premise_activity"
+
+        # Synthesize forensic summary
+        if salient_descs:
+            main_finding = salient_descs[0]
+            if not main_finding.endswith("."):
+                main_finding += "."
+            if len(salient_descs) > 1:
+                secondary = salient_descs[1]
+                if not secondary.endswith("."):
+                    secondary += "."
+                desc = f"{cam_label}{main_finding} Corroborated by {len(cluster)} observation(s); {secondary}"
+            else:
+                desc = f"{cam_label}{main_finding} Corroborated by {len(cluster)} visual/acoustic observation(s)."
+        else:
+            desc = f"{cam_label}Monitored activity detected ({_format_timecode(c_start)} - {_format_timecode(c_end)}) across {len(cluster)} observation(s)."
+
+        events_data.append(
+            {
+                "event_type": event_type,
+                "description": desc,
+                "observation_ids": cluster_oids,
+            }
+        )
+
+    # 6. Generate sequential chronological links
+    links_data: list[dict[str, Any]] = [
+        {
+            "from_event_index": i,
+            "to_event_index": i + 1,
+            "relationship_type": "before",
+            "rationale": "Chronological progression in forensic timeline.",
+        }
+        for i in range(len(events_data) - 1)
+    ]
+
+    return events_data, links_data
 
 
 class EventCorrelatorWorker(BaseToolWorker):
@@ -97,18 +307,28 @@ class EventCorrelatorWorker(BaseToolWorker):
         obs_summary = "\n".join(obs_summary_lines)
 
         prompt = (
-            "You are a forensic multi-video timeline and premise analyst. "
-            "Correlate the following observations across all cameras and video feeds covering the premise into discrete chronological events.\n"
+            "You are a forensic multi-video timeline and premise security analyst.\n"
+            "Analyze and synthesize the following observations across all cameras and feeds into distinct, "
+            "concrete MAJOR EVIDENCE EVENTS.\n"
             f"{obj_context}"
             f"Observations from Premise Feeds:\n{obs_summary}\n\n"
-            "INSTRUCTIONS:\n"
-            "1. Group temporally and logically related observations into distinct forensic events.\n"
-            "2. For activities progressing across multiple cameras on the premise (e.g. subject moving from entrance to courtyard to interior), "
-            "synthesize cross-camera events connecting the trajectory, and reference observations from all involved cameras.\n"
-            "3. Clearly identify the camera locations in each event description.\n"
-            "4. Return JSON with 'events', each with: 'event_type', 'description', and 'observation_ids'.\n"
-            "5. Include 'links' between events with 'from_event_index', 'to_event_index', 'relationship_type' "
-            "(before/after/overlaps/related_to/possible_same_incident), and 'rationale'."
+            "CRITICAL FORENSIC INSTRUCTIONS:\n"
+            "1. Group temporally and logically related observations into distinct major evidence events. "
+            "Do NOT lump the entire timeline into a single generic event.\n"
+            "2. Identify specific activities (e.g., person movement, vehicle arrival/departure, perimeter entry, acoustic alarms, object manipulation).\n"
+            "3. For each event provide:\n"
+            "   - 'event_type': Specific category (e.g. 'person_activity', 'vehicle_movement', 'perimeter_entry', 'acoustic_alert', 'loitering')\n"
+            "   - 'description': Clear, factual summary identifying who/what was observed, action taken, and camera location (e.g., 'Person in dark attire observed walking along North Fence toward gate.').\n"
+            "   - 'observation_ids': List of specific observation IDs directly supporting this distinct occurrence.\n"
+            "4. Return a valid JSON object strictly matching:\n"
+            "{\n"
+            '  "events": [\n'
+            '    {"event_type": "...", "description": "...", "observation_ids": ["..."]}\n'
+            "  ],\n"
+            '  "links": [\n'
+            '    {"from_event_index": 0, "to_event_index": 1, "relationship_type": "before", "rationale": "..."}\n'
+            "  ]\n"
+            "}"
         )
 
         events_data: list[dict[str, Any]] = []
@@ -117,56 +337,21 @@ class EventCorrelatorWorker(BaseToolWorker):
         try:
             response = self.llm.generate_text(prompt=prompt, json_mode=True)
             if response and response.content:
-                parsed = json.loads(response.content)
-                if isinstance(parsed, dict):
-                    events_data = parsed.get("events", [])
-                    links_data = parsed.get("links", [])
-                elif isinstance(parsed, list):
-                    events_data = parsed
+                events_data, links_data = parse_correlator_response(response.content)
         except Exception as exc:
             logger.warning(
-                "EventCorrelatorWorker: LLM correlation failed (%s); using fallback correlation.",
+                "EventCorrelatorWorker: LLM correlation failed (%s); using forensic clustering fallback.",
                 exc,
             )
             events_data = []
 
         if not events_data:
-            # Fallback: group observations by media asset / camera or sequential clusters
-            obs_by_asset: dict[str, list[str]] = {}
-            for o in observations:
-                sr = o.source_references[0] if o.source_references else None
-                mid = sr.media_asset_id if sr else "default"
-                obs_by_asset.setdefault(mid, []).append(o.observation_id)
-
-            if len(obs_by_asset) > 1:
-                events_data = []
-                for mid, oids in obs_by_asset.items():
-                    asset = media_map.get(mid)
-                    cam_name = asset.camera_id if asset and asset.camera_id else mid
-                    events_data.append(
-                        {
-                            "event_type": "premise_activity_detected",
-                            "description": f"Correlated activity on premise feed '{cam_name}' supported by {len(oids)} observation(s).",
-                            "observation_ids": oids,
-                        }
-                    )
-                links_data = [
-                    {
-                        "from_event_index": i,
-                        "to_event_index": i + 1,
-                        "relationship_type": "before",
-                        "rationale": "Chronological progression across premise camera feeds.",
-                    }
-                    for i in range(len(events_data) - 1)
-                ]
-            else:
-                events_data = [
-                    {
-                        "event_type": "incident_occurrence",
-                        "description": "Correlated occurrence supported by visual and/or acoustic observations.",
-                        "observation_ids": obs_ids,
-                    }
-                ]
+            logger.info("EventCorrelatorWorker: applying temporal forensic clustering to synthesize major evidence events.")
+            events_data, links_data = _cluster_fallback_events(
+                observations=observations,
+                media_map=media_map,
+                camera_map=camera_map,
+            )
 
         created_event_ids: list[str] = []
         created_events: list[Event] = []

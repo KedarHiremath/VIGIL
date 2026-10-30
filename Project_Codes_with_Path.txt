@@ -16,11 +16,19 @@ VIGIL
 │   │   ├── VIGIL_context.md
 │   │   ├── VIGIL_vison_modelContext.txt
 │   │   └── Workflow.png
-│   └── frontend
-│       ├── api_integration_and_contracts.md
-│       ├── README.md
-│       ├── ui_architecture_and_components.md
-│       └── user_guide_and_workflows.md
+│   ├── frontend
+│   │   ├── api_integration_and_contracts.md
+│   │   ├── README.md
+│   │   ├── ui_architecture_and_components.md
+│   │   └── user_guide_and_workflows.md
+│   ├── Sample project submission documents
+│   │   ├── format_doc_text.txt
+│   │   ├── Project report sample.pdf
+│   │   ├── sample_pdf_text.txt
+│   │   ├── VIGIL_Project_Report.docx
+│   │   ├── VIIT Project_Report_Format_2025-26_Course.doc
+│   │   └── ~$IT Project_Report_Format_2025-26_Course.doc
+│   └── VIGIL_Project_Report.docx
 ├── src
 │   └── vigil
 │       ├── agent
@@ -157,6 +165,7 @@ VIGIL
 │   │   ├── tools
 │   │   │   ├── test_entity_and_observation_reliability.py
 │   │   │   ├── test_entity_resolution.py
+│   │   │   ├── test_event_correlation_evidence.py
 │   │   │   ├── test_media_workers.py
 │   │   │   ├── test_tools.py
 │   │   │   └── test_visual_evidence.py
@@ -182,7 +191,8 @@ VIGIL
 ├── README.md
 ├── requirements.txt
 ├── uv.lock
-└── VIGIL_Project_Documentation.md
+├── VIGIL_Project_Documentation.md
+└── VIGIL_Project_Report.docx
 
 PATH - src\vigil\__init__.py
 CODE:
@@ -13341,12 +13351,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from vigil.domain.event import Event
 from vigil.domain.event_link import EventLink
+from vigil.domain.observation import Observation
 from vigil.orchestration.task_types import TaskRequest
 from vigil.tools.base import BaseToolWorker
 
@@ -13360,6 +13372,214 @@ def _format_timecode(seconds: float | None) -> str:
     mins = int(seconds // 60)
     secs = seconds % 60
     return f"{mins:02d}:{secs:05.2f}"
+
+
+def parse_correlator_response(raw_text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Parse events and links from LLM response safely, handling code fences and JSON wrappers."""
+    if not raw_text or not raw_text.strip():
+        return [], []
+
+    cleaned = raw_text.strip()
+    if "```" in cleaned:
+        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
+        if fence_match:
+            cleaned = fence_match.group(1).strip()
+        else:
+            cleaned = re.sub(r"^```[a-z]*\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+
+    # Find JSON boundaries
+    json_str = cleaned
+    if "{" in cleaned and "}" in cleaned:
+        start_idx = cleaned.find("{")
+        end_idx = cleaned.rfind("}")
+        json_str = cleaned[start_idx : end_idx + 1]
+    elif "[" in cleaned and "]" in cleaned:
+        start_idx = cleaned.find("[")
+        end_idx = cleaned.rfind("]")
+        json_str = cleaned[start_idx : end_idx + 1]
+
+    try:
+        parsed = json.loads(json_str)
+        if isinstance(parsed, dict):
+            evs = parsed.get("events", [])
+            links = parsed.get("links", [])
+            valid_events = [e for e in evs if isinstance(e, dict) and (e.get("description") or e.get("event_type"))]
+            valid_links = [l for l in links if isinstance(l, dict)]
+            return valid_events, valid_links
+        elif isinstance(parsed, list):
+            valid_events = [e for e in parsed if isinstance(e, dict) and (e.get("description") or e.get("event_type"))]
+            return valid_events, []
+    except Exception:
+        pass
+    return [], []
+
+
+def _cluster_fallback_events(
+    observations: list[Observation],
+    media_map: dict[str, Any],
+    camera_map: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Forensically cluster observations into discrete chronological events with synthesized evidence summaries.
+
+    Avoids monolithic single-event fallbacks or placeholder text.
+    """
+    if not observations:
+        return [], []
+
+    # 1. Filter out failed analyses if other valid observations exist
+    valid_obs = [
+        o for o in observations
+        if o.observation_type != "analysis_failed" and (o.confidence is None or o.confidence > 0.0)
+    ]
+    if not valid_obs:
+        valid_obs = observations
+
+    # 2. Sort observations chronologically
+    def _obs_start(o: Observation) -> float:
+        if o.source_references and o.source_references[0].start_seconds is not None:
+            return float(o.source_references[0].start_seconds)
+        return 0.0
+
+    valid_obs.sort(key=_obs_start)
+
+    # 3. Check if all observations are clean inspections
+    clean_count = sum(
+        1 for o in valid_obs
+        if "no salient" in o.description.lower() or "routine" in o.description.lower() or o.observation_type == "visual_inspection"
+    )
+    if clean_count == len(valid_obs):
+        # Entire timeline analyzed without incident
+        start_t = _obs_start(valid_obs[0])
+        end_t = (
+            valid_obs[-1].source_references[0].end_seconds
+            if valid_obs[-1].source_references and valid_obs[-1].source_references[0].end_seconds is not None
+            else start_t + 1.0
+        )
+        return [
+            {
+                "event_type": "routine_surveillance",
+                "description": f"Routine surveillance coverage maintained across sector ({_format_timecode(start_t)} - {_format_timecode(end_t)}); no security anomalies detected.",
+                "observation_ids": [o.observation_id for o in valid_obs],
+            }
+        ], []
+
+    # 4. Group into chronological clusters (gap > 8.0s triggers a new event)
+    clusters: list[list[Observation]] = []
+    current_cluster: list[Observation] = []
+    last_end = -1.0
+
+    for obs in valid_obs:
+        start_sec = _obs_start(obs)
+        end_sec = (
+            obs.source_references[0].end_seconds
+            if obs.source_references and obs.source_references[0].end_seconds is not None
+            else start_sec
+        )
+
+        if not current_cluster:
+            current_cluster.append(obs)
+            last_end = end_sec
+        else:
+            time_gap = start_sec - last_end
+            if time_gap > 8.0 or len(current_cluster) >= 15:
+                clusters.append(current_cluster)
+                current_cluster = [obs]
+                last_end = end_sec
+            else:
+                current_cluster.append(obs)
+                last_end = max(last_end, end_sec)
+
+    if current_cluster:
+        clusters.append(current_cluster)
+
+    # 5. Synthesize distinct forensic events for each cluster
+    events_data: list[dict[str, Any]] = []
+
+    for cluster in clusters:
+        cluster_oids = [o.observation_id for o in cluster]
+        c_start = _obs_start(cluster[0])
+        c_end = max(
+            (
+                o.source_references[0].end_seconds
+                if o.source_references and o.source_references[0].end_seconds is not None
+                else _obs_start(o)
+            )
+            for o in cluster
+        )
+
+        # Camera context
+        first_sr = cluster[0].source_references[0] if cluster[0].source_references else None
+        cam_label = ""
+        if first_sr and first_sr.media_asset_id in media_map:
+            asset = media_map[first_sr.media_asset_id]
+            if asset.camera_id and asset.camera_id in camera_map:
+                cam = camera_map[asset.camera_id]
+                cam_label = f"[{cam.location_label or cam.name or cam.camera_id}] "
+            elif asset.camera_id:
+                cam_label = f"[{asset.camera_id}] "
+
+        # Determine dominant type and salient descriptions
+        types_count: dict[str, int] = {}
+        salient_descs: list[str] = []
+
+        for o in cluster:
+            t = o.observation_type
+            types_count[t] = types_count.get(t, 0) + 1
+            d = o.description.strip()
+            # Clean camera prefixes from individual observation descriptions for synthesis
+            clean_d = re.sub(r"^\[[^\]]+\]\s*", "", d)
+            if "no salient" not in clean_d.lower() and clean_d not in salient_descs:
+                salient_descs.append(clean_d)
+
+        # Derive event_type
+        dominant_type = max(types_count.keys(), key=lambda k: types_count[k]) if types_count else "visual_detection"
+        if "person" in dominant_type:
+            event_type = "person_activity"
+        elif "vehicle" in dominant_type:
+            event_type = "vehicle_movement"
+        elif "acoustic" in dominant_type or "audio" in dominant_type:
+            event_type = "acoustic_incident"
+        elif "incident" in dominant_type or "intrusion" in dominant_type or "breach" in dominant_type:
+            event_type = dominant_type
+        else:
+            event_type = "premise_activity"
+
+        # Synthesize forensic summary
+        if salient_descs:
+            main_finding = salient_descs[0]
+            if not main_finding.endswith("."):
+                main_finding += "."
+            if len(salient_descs) > 1:
+                secondary = salient_descs[1]
+                if not secondary.endswith("."):
+                    secondary += "."
+                desc = f"{cam_label}{main_finding} Corroborated by {len(cluster)} observation(s); {secondary}"
+            else:
+                desc = f"{cam_label}{main_finding} Corroborated by {len(cluster)} visual/acoustic observation(s)."
+        else:
+            desc = f"{cam_label}Monitored activity detected ({_format_timecode(c_start)} - {_format_timecode(c_end)}) across {len(cluster)} observation(s)."
+
+        events_data.append(
+            {
+                "event_type": event_type,
+                "description": desc,
+                "observation_ids": cluster_oids,
+            }
+        )
+
+    # 6. Generate sequential chronological links
+    links_data: list[dict[str, Any]] = [
+        {
+            "from_event_index": i,
+            "to_event_index": i + 1,
+            "relationship_type": "before",
+            "rationale": "Chronological progression in forensic timeline.",
+        }
+        for i in range(len(events_data) - 1)
+    ]
+
+    return events_data, links_data
 
 
 class EventCorrelatorWorker(BaseToolWorker):
@@ -13434,18 +13654,28 @@ class EventCorrelatorWorker(BaseToolWorker):
         obs_summary = "\n".join(obs_summary_lines)
 
         prompt = (
-            "You are a forensic multi-video timeline and premise analyst. "
-            "Correlate the following observations across all cameras and video feeds covering the premise into discrete chronological events.\n"
+            "You are a forensic multi-video timeline and premise security analyst.\n"
+            "Analyze and synthesize the following observations across all cameras and feeds into distinct, "
+            "concrete MAJOR EVIDENCE EVENTS.\n"
             f"{obj_context}"
             f"Observations from Premise Feeds:\n{obs_summary}\n\n"
-            "INSTRUCTIONS:\n"
-            "1. Group temporally and logically related observations into distinct forensic events.\n"
-            "2. For activities progressing across multiple cameras on the premise (e.g. subject moving from entrance to courtyard to interior), "
-            "synthesize cross-camera events connecting the trajectory, and reference observations from all involved cameras.\n"
-            "3. Clearly identify the camera locations in each event description.\n"
-            "4. Return JSON with 'events', each with: 'event_type', 'description', and 'observation_ids'.\n"
-            "5. Include 'links' between events with 'from_event_index', 'to_event_index', 'relationship_type' "
-            "(before/after/overlaps/related_to/possible_same_incident), and 'rationale'."
+            "CRITICAL FORENSIC INSTRUCTIONS:\n"
+            "1. Group temporally and logically related observations into distinct major evidence events. "
+            "Do NOT lump the entire timeline into a single generic event.\n"
+            "2. Identify specific activities (e.g., person movement, vehicle arrival/departure, perimeter entry, acoustic alarms, object manipulation).\n"
+            "3. For each event provide:\n"
+            "   - 'event_type': Specific category (e.g. 'person_activity', 'vehicle_movement', 'perimeter_entry', 'acoustic_alert', 'loitering')\n"
+            "   - 'description': Clear, factual summary identifying who/what was observed, action taken, and camera location (e.g., 'Person in dark attire observed walking along North Fence toward gate.').\n"
+            "   - 'observation_ids': List of specific observation IDs directly supporting this distinct occurrence.\n"
+            "4. Return a valid JSON object strictly matching:\n"
+            "{\n"
+            '  "events": [\n'
+            '    {"event_type": "...", "description": "...", "observation_ids": ["..."]}\n'
+            "  ],\n"
+            '  "links": [\n'
+            '    {"from_event_index": 0, "to_event_index": 1, "relationship_type": "before", "rationale": "..."}\n'
+            "  ]\n"
+            "}"
         )
 
         events_data: list[dict[str, Any]] = []
@@ -13454,56 +13684,21 @@ class EventCorrelatorWorker(BaseToolWorker):
         try:
             response = self.llm.generate_text(prompt=prompt, json_mode=True)
             if response and response.content:
-                parsed = json.loads(response.content)
-                if isinstance(parsed, dict):
-                    events_data = parsed.get("events", [])
-                    links_data = parsed.get("links", [])
-                elif isinstance(parsed, list):
-                    events_data = parsed
+                events_data, links_data = parse_correlator_response(response.content)
         except Exception as exc:
             logger.warning(
-                "EventCorrelatorWorker: LLM correlation failed (%s); using fallback correlation.",
+                "EventCorrelatorWorker: LLM correlation failed (%s); using forensic clustering fallback.",
                 exc,
             )
             events_data = []
 
         if not events_data:
-            # Fallback: group observations by media asset / camera or sequential clusters
-            obs_by_asset: dict[str, list[str]] = {}
-            for o in observations:
-                sr = o.source_references[0] if o.source_references else None
-                mid = sr.media_asset_id if sr else "default"
-                obs_by_asset.setdefault(mid, []).append(o.observation_id)
-
-            if len(obs_by_asset) > 1:
-                events_data = []
-                for mid, oids in obs_by_asset.items():
-                    asset = media_map.get(mid)
-                    cam_name = asset.camera_id if asset and asset.camera_id else mid
-                    events_data.append(
-                        {
-                            "event_type": "premise_activity_detected",
-                            "description": f"Correlated activity on premise feed '{cam_name}' supported by {len(oids)} observation(s).",
-                            "observation_ids": oids,
-                        }
-                    )
-                links_data = [
-                    {
-                        "from_event_index": i,
-                        "to_event_index": i + 1,
-                        "relationship_type": "before",
-                        "rationale": "Chronological progression across premise camera feeds.",
-                    }
-                    for i in range(len(events_data) - 1)
-                ]
-            else:
-                events_data = [
-                    {
-                        "event_type": "incident_occurrence",
-                        "description": "Correlated occurrence supported by visual and/or acoustic observations.",
-                        "observation_ids": obs_ids,
-                    }
-                ]
+            logger.info("EventCorrelatorWorker: applying temporal forensic clustering to synthesize major evidence events.")
+            events_data, links_data = _cluster_fallback_events(
+                observations=observations,
+                media_map=media_map,
+                camera_map=camera_map,
+            )
 
         created_event_ids: list[str] = []
         created_events: list[Event] = []
@@ -13765,6 +13960,14 @@ class EvidenceAssessorWorker(BaseToolWorker):
                 response = self.llm.generate_text(prompt=prompt, json_mode=True)
                 if response and response.content and response.content.strip():
                     raw = response.content.strip()
+                    if "```" in raw:
+                        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
+                        if fence_match:
+                            raw = fence_match.group(1).strip()
+                    if "{" in raw and "}" in raw:
+                        s_idx = raw.find("{")
+                        e_idx = raw.rfind("}")
+                        raw = raw[s_idx : e_idx + 1]
                     try:
                         parsed = json.loads(raw)
                         if isinstance(parsed, dict):
@@ -16980,9 +17183,12 @@ CODE:
       card.className = `event-card ${evt.status}`;
       card.id = `eventCard-${evt.event_id}`;
 
-      const timeRange = (evt.start_seconds !== null && evt.end_seconds !== null)
-        ? `${evt.start_seconds.toFixed(1)}s &ndash; ${evt.end_seconds.toFixed(1)}s`
-        : "-";
+      let timeRange = "-";
+      if (evt.start_seconds !== null && evt.end_seconds !== null) {
+        timeRange = `<code>${formatSecondsToTimecode(evt.start_seconds)} &ndash; ${formatSecondsToTimecode(evt.end_seconds)}</code> <small style="color:var(--text-dim)">(${evt.start_seconds.toFixed(1)}s &ndash; ${evt.end_seconds.toFixed(1)}s)</small>`;
+      } else if (evt.start_seconds !== null) {
+        timeRange = `<code>${formatSecondsToTimecode(evt.start_seconds)}</code> <small style="color:var(--text-dim)">(${evt.start_seconds.toFixed(1)}s)</small>`;
+      }
 
       let reviewNotesHtml = "";
       if (evt.reviewer || evt.review_notes) {
@@ -16999,6 +17205,64 @@ CODE:
         cameraBadgeHtml = `<span class="badge cam-badge">${matchedCam.camera_id.toUpperCase()}</span>`;
       }
 
+      // Supporting Observations Breakdown
+      const supportingObs = (evt.observation_ids || [])
+        .map(id => state.observations.find(o => o.observation_id === id))
+        .filter(Boolean);
+
+      let evidenceHtml = "";
+      if (supportingObs.length > 0) {
+        const displayObs = supportingObs.slice(0, 3);
+        const remainingCount = supportingObs.length - displayObs.length;
+        const obsItemsHtml = displayObs.map(obs => {
+          const sr = obs.source_references && obs.source_references.length > 0 ? obs.source_references[0] : null;
+          const tStr = sr && sr.start_seconds !== null ? formatSecondsToTimecode(sr.start_seconds) : "-";
+          const cleanD = cleanObservationDesc(obs.description);
+          const confP = obs.confidence !== null ? `${Math.round(obs.confidence * 100)}%` : "";
+          const targetAsset = sr?.media_asset_id || "";
+          return `
+            <div class="event-obs-item" title="Click to jump to this evidence in video player" data-time="${sr?.start_seconds || 0}" data-asset="${targetAsset}">
+              <div class="obs-item-head">
+                <span class="modality-badge modality-${obs.modality}">${obs.modality.toUpperCase()}</span>
+                <span class="obs-timecode">${tStr}</span>
+                ${confP ? `<span class="obs-conf">${confP}</span>` : ""}
+              </div>
+              <div class="obs-item-desc">${escapeHtml(cleanD)}</div>
+            </div>
+          `;
+        }).join("");
+
+        evidenceHtml = `
+          <div class="event-evidence-block">
+            <div class="evidence-block-title">
+              <span>Supporting Observations: <strong>${supportingObs.length}</strong></span>
+              <span style="font-size:0.68rem; color:var(--text-dim);">&#x25B6; Click item to seek</span>
+            </div>
+            <div class="evidence-obs-list">
+              ${obsItemsHtml}
+            </div>
+            ${remainingCount > 0 ? `<div class="obs-more-hint">+ ${remainingCount} more supporting observation(s) in repository</div>` : ""}
+          </div>
+        `;
+      }
+
+      // Evidence Quality Assessment
+      const eventAssessment = state.assessments.find(a => a.target_id === evt.event_id);
+      let assessmentHtml = "";
+      if (eventAssessment) {
+        const rat = eventAssessment.rating || "moderate";
+        const cleanRat = cleanRationaleText(eventAssessment.rationale || "");
+        assessmentHtml = `
+          <div class="event-assessment-box">
+            <div class="assessment-head">
+              <span class="rating-badge rating-${rat}">QUALITY: ${rat.toUpperCase()}</span>
+              <span class="assessment-type">${escapeHtml(eventAssessment.assessment_type.replace(/_/g, " ").toUpperCase())}</span>
+            </div>
+            ${cleanRat ? `<div class="assessment-rationale-text">${escapeHtml(cleanRat)}</div>` : ""}
+          </div>
+        `;
+      }
+
       card.innerHTML = `
         <div class="event-card-head">
           <div style="display:flex; align-items:center; gap:6px;">
@@ -17008,7 +17272,9 @@ CODE:
           <span class="status-pill status-${evt.status}">${evt.status}</span>
         </div>
         <div class="event-card-id">#${evt.event_id} &bull; Interval: <strong>${timeRange}</strong></div>
-        <div class="event-card-desc">${escapeHtml(evt.description)}</div>
+        <div class="event-card-desc"><strong>${escapeHtml(evt.description)}</strong></div>
+        ${evidenceHtml}
+        ${assessmentHtml}
         ${reviewNotesHtml}
         <div class="event-card-actions">
           <button class="btn btn-sm btn-confirm" data-id="${evt.event_id}" title="Confirm Verified Event (Removes from pending queue)">&#x2714; Confirm</button>
@@ -17044,6 +17310,17 @@ CODE:
 
       // Slice Incident Clip
       card.querySelector(".btn-clip").addEventListener("click", () => sliceEventClipDirectly(evt.event_id));
+
+            // Seek to observation moment on clicking evidence item
+      card.querySelectorAll(".event-obs-item").forEach(item => {
+        item.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const targetTime = parseFloat(item.getAttribute("data-time") || 0);
+          const targetAsset = item.getAttribute("data-asset");
+          if (targetAsset) switchCameraFeed(targetAsset, false);
+          if (!isNaN(targetTime)) el.mainVideoPlayer.currentTime = targetTime;
+        });
+      });
 
       el.eventsList.appendChild(card);
     });
@@ -20627,6 +20904,95 @@ kbd {
   background: rgba(239, 68, 68, 0.12);
 }
 
+/* Human Review Evidence Analysis Enhancements */
+.event-evidence-block {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin-top: 4px;
+}
+.evidence-block-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #94a3b8;
+  margin-bottom: 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.evidence-obs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.event-obs-item {
+  background: rgba(30, 41, 59, 0.75);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 0.73rem;
+  border-left: 2px solid var(--accent-blue);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.event-obs-item:hover {
+  background: rgba(51, 65, 85, 0.95);
+  border-left-color: var(--accent-cyan);
+}
+.obs-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.obs-timecode {
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+.obs-conf {
+  font-size: 0.68rem;
+  color: var(--success-green);
+  font-weight: 600;
+  margin-left: auto;
+}
+.obs-item-desc {
+  color: #e2e8f0;
+  font-size: 0.73rem;
+  line-height: 1.35;
+}
+.obs-more-hint {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  margin-top: 5px;
+  font-style: italic;
+}
+.event-assessment-box {
+  background: rgba(2, 6, 23, 0.75);
+  border: 1px dashed rgba(148, 163, 184, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  margin-top: 4px;
+}
+.assessment-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.assessment-type {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+.assessment-rationale-text {
+  font-size: 0.72rem;
+  color: #cbd5e1;
+  line-height: 1.35;
+}
+
 --------------------------------------------------------------------------------
 PATH - src\vigil\ui\UI_documentation.txt
 CODE:
@@ -22561,6 +22927,2305 @@ From the **`Export Deliverable ▾`** menu:
 | <kbd>E</kbd> | Toggle Export Menu | Global |
 | <kbd>?</kbd> | Show Keyboard Shortcuts Cheat Sheet | Global |
 | <kbd>Esc</kbd> | Close any open modal or menu | Global |
+
+--------------------------------------------------------------------------------
+PATH - documentation\Sample project submission documents\format_doc_text.txt
+CODE:
+﻿BRACT’s
+Vishwakarma Institute of Information Technology, Pune
+
+Department of Computer Engineering.
+										
+Instructions for Writing B.Tech. Project Work Report 
+
+Prepare “Number students in group+1” copies of your project report.
+Limit your project report 50 to 60 pages (Excluding certificate, Table of Contents, acknowledgement, glossary and references)
+The footer “Department of Computer Engineering, VIIT. 2026-27” should be included. (10, Times Roman, Center justified)
+Main part of project report should be Times Roman, 12 pts, justified and 1.5 line spacing.
+Use paper size 8.5” x 11” or A4 (210 x 197 mm). Follow following margins.
+
+Margin
+Paper 8.5” x 11”
+Paper A4
+
+Top
+1”
+23.4 mm
+
+Left
+1.5”
+37 mm
+
+Bottom
+1.25”
+32 mm
+
+Right
+1 “
+23.4 mm
+
+
+There should be double line space between paragraphs. Each paragraph will begin with a five-space indentation.
+Chapter titles should be bold with 14 pts typed in CAPITAL letters and should be aligned at the center of the page.
+Section heading should be aligned at the left with 12 pts and bold and capitalized. 
+Section subheading should be aligned at the left with title case.
+Leave two spaces between section heading and one space between two-section subheadings.
+Illustrations (Charts, drawings, photographs and figures.) must be embedded in text. 
+Illustrations must be sharp, clear, black and white. 
+Illustrations should not be more than 2 per page. (One is ideal).
+Figure No and title at bottom with 12 pt.
+Legends below the title in 10 pt.
+Proper margins from all sides.
+Illustrations should not be photocopied.
+Number the pages centrally below the footer.
+References should be in the order as they appear in the report.
+Symbols and notations, if any should be included in nomenclature section only.
+Order of report: -
+Cover page and front page 		[Refer P1]
+Certificate from Institute.		[Refer P2]
+Certificate from industry, if any.		
+Acknowledgement
+Abstract
+Table of Contents				 [Refer P3]		
+Chapters
+References
+
+All chapters, section heading and subheadings should be numbered. For chapters use numbers 1, 2, 3 and for subheadings 1.1,1.2, 1.3. And section subheadings 1.1.1, 1.1.2 etc.
+
+Use the template provided for writing cover page and certificate with the same font size, type and spacing.
+
+
+Page numbers - Start numbering from introduction with 1, other pages like certificate, 
+acknowledgement, abstract, table of contents etc. with small Roman.
+
+19. Plagiarism check report should be attached.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[P-1]
+					(Four blank spaces)
+A REPORT ON (12/bold, upper case)
+(Two blank spaces)
+
+YOUR PROJECT TITLE GOES HERE (16/bold, upper case)
+(Two blank spaces)
+
+SUBMITTED TO THE VISHWAKARMA INSTITUTE OF INFORMATION TECHNOLOGY, PUNE
+IN THE PARTIAL FULFILLMENT OF THE REQUIREMENTS 
+FOR THE AWARD OF THE DEGREE (12, upper case)
+(One blank space)
+OF (12, upper case)
+(Two blank spaces)
+
+BACHELOR OF TECHNOLOGY (COMPUTER ENGINEERING) 
+(16/bold, upper case)
+(Two blank spaces)
+SUBMITTED BY
+ (12, upper case)
+(Two blank spaces)
+
+STUDENT NAME		Exam Seat No. :(12, bold/upper case)
+
+(Two blank spaces)
+
+
+DEPARTMENT OF COMPUTER ENGINEERING
+(16 bold/upper case)
+(One blank spaces)
+
+BRACT’S
+VISHWAKARMA INSTITUTE OF INFORMATION TECHNOLOGY
+ (12, bold/upper case), (One blank space)
+
+SURVEY NO. 3/4, KONDHWA (BUDRUK), PUNE – 411048, MAHARASHTRA (INDIA).
+(12, bold/upper case)
+(One blank space)
+BRACT’S 
+VISHWAKARMA INSTITUTE OF INFORMATION TECHNOLOGY, PUNE
+ (12, bold/upper case)
+2026 -2027
+(12, bold/upper case)
+
+[P-2]
+
+CERTIFICATE (14, bold/upper case)
+(Three blank spaces)
+
+This is to certify that the project report entitles (12, sentence case)
+(One blank space)
+“YOUR PROJECT TITLE GOES HERE” (12, bold/upper case)
+(Two blank spaces)
+Submitted by
+(One blank space)
+
+STUDENT NAME	Exam Seat No.: B210808(12, bold/upper case)
+
+(One blank space)
+is a Bonafide student at this institute and the work has been carried out by him/her under the supervision of Prof. A. B. C and it is approved for the partial fulfillment of the requirement of VISHWAKARMA INSTITUTE OF INFORMATION TECHNOLOGY, for the award of the degree of Bachelor of Technology (Computer Engineering). 
+(12, Sentence case)
+(One blank space)
+
+(Four blank spaces)
+
+(Prof. ……………)					              (Dr. S. R. Shinde) 
+Guide 								Head,
+Department of Computer Engineering		Department of Computer Engineering
+(12, Sentence case)
+
+
+(Dr. Vivek Deshpande)
+Director, 
+BRACT’s Vishwakarma Institute of Information Technology, Pune-48
+
+Place: Pune
+Date:
+ACKNOWLEDGEMENT
+(14, bold/upper case)
+
+Statement goes here (12, Sentence case)
+
+
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+NAME OF THE STUDENTS
+
+
+ABSTRACT (14, bold, uppercase)
+Statement goes here (12, Sentence case)
+Abstract should include overview of Context of the project, Problem, Solution & Conclusion.  Divide it into 2/3 paragraphs.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[P3]
+
+(Four blank spaces)
+TABLE OF CONTENTS (14, bold, uppercase)
+
+LIST OF ABBREVATIONS			i
+LIST OF FIGURES				ii
+LIST OF TABLES				iii
+(12, UPPERCASE)
+
+
+     CHAPTER				TITLE				PAGE NO.
+(12, bold, UPPERCASE)
+
+Sr. No.
+Title of Chapter
+Page No.
+
+    01
+Introduction
+
+
+
+1.1
+Overview
+
+
+
+1.2
+Motivation  
+
+
+
+1.3
+Problem Definition and Objectives	
+
+
+
+1.4
+Project Scope & Limitations 
+
+
+
+1.5
+Methodologies of Problem solving
+
+
+02
+Literature Survey
+
+
+03
+Software Requirements Specification
+
+
+
+3.1
+Assumptions and Dependencies
+
+
+
+3.2
+Functional Requirements
+
+
+
+
+3.2.1
+System Feature 1(Functional Requirement)
+
+
+
+
+3.2.2
+System Feature2 (Functional Requirement)
+
+
+
+
+
+……
+
+
+
+
+
+……
+
+
+
+3.3
+External Interface Requirements (If Any)
+
+
+
+
+3.3.1
+User Interfaces
+
+
+
+
+3.3.2
+Hardware Interfaces
+
+
+
+
+3.3.3
+Software Interfaces
+
+
+
+
+3.3.4
+Communication Interfaces
+
+
+
+3.4
+Nonfunctional Requirements
+
+
+
+
+3.4.1
+Performance Requirements
+
+
+
+
+3.4.2
+Safety Requirements
+
+
+
+
+3.4.3
+Security Requirements
+
+
+
+
+3.4.4
+Software Quality Attributes
+
+
+
+3.5
+System Requirements 
+
+
+
+
+3.5.1
+Database Requirements
+
+
+
+
+3.5.2
+Software Requirements (Platform Choice)
+
+
+
+
+3.5.3
+Hardware Requirements
+
+
+
+3.6
+Analysis Models: SDLC Model to be applied
+
+
+04
+System Design
+
+
+
+4.1
+System Architecture
+
+
+
+4.2
+Mathematical Model
+
+
+
+4.3
+Data Flow Diagrams
+
+
+
+4.4
+Entity Relationship Diagrams
+
+
+
+4.5
+UML Diagrams
+
+
+05
+Project Plan
+
+
+
+5.1
+Project Estimate
+
+
+
+
+5.1.1
+Reconciled Estimates
+
+
+
+
+5.1.2
+Project Resources
+
+
+
+5.2
+Risk Management
+
+
+
+
+5.2.1
+Risk Identification
+
+
+
+
+5.2.2
+Risk Analysis
+
+
+
+
+5.2.3
+Overview of Risk Mitigation, Monitoring, Management
+
+
+
+5.3
+Project Schedule
+
+
+
+
+5.3.1
+Project Task Set
+
+
+
+
+5.3.2
+Task Network
+
+
+
+
+5.3.3
+Timeline Chart
+
+
+
+5.4
+Team Organization
+
+
+
+
+5.4.1
+Team structure
+
+
+
+
+5.4.2
+Management reporting and communication
+
+
+06
+Project Implementation
+
+
+
+6.1
+Overview of Project Modules
+
+
+
+6.2
+Tools and Technologies Used
+
+
+
+6.3
+Algorithm Details
+
+
+
+
+6.3.1
+Algorithm 1
+
+
+
+
+6.3.2
+Algorithm 2
+
+
+
+
+6.3.3
+…
+
+
+07
+Software Testing
+
+
+
+7.1
+Type of Testing
+
+
+
+7.2
+Test cases & Test Results
+
+
+08
+Results
+
+
+
+8.1
+Outcomes
+
+
+
+8.2
+Screen Shots
+
+
+09
+Conclusions
+
+
+
+9.1
+Conclusions
+
+
+
+9.2
+Future Work
+
+
+
+9.3
+Applications
+
+
+ 
+Appendix A: Problem statement feasibility assessment using, satisfiability analysis and NP Hard, NP-Complete or P type using modern algebra and relevant mathematical models.
+Appendix B: Details of paper publication: name of the conference/journal, comments of reviewers, certificate, paper.
+Appendix C: Plagiarism Report of project report. 
+
+
+
+References
+Thomas Noltey, Hans Hanssony, Lucia Lo Belloz,”Communication Buses for Automotive Applications” In Proceedings of the 3rd Information Survivability Workshop (ISW-2007), Boston, Massachusetts, USA, October 2007. IEEE Computer Society.
+
+
+
+
+Documents
+All FTR reports (FTR 1, 2 and 3)
+If Project is In-House
+Paper acceptance email
+Paper published certificate
+Paper copy (online)
+If project is Industry sponsored
+Sponsorship letter
+Project completion letter from industry
+IPR copy if any
+Project completion letter (as per our format)
+
+
+
+
+
+
+
+
+
+LIST OF ABBREVATIONS
+Abbreviation
+Illustration
+
+
+
+
+VPN
+Virtual Private Network
+
+IP
+Internet Protocol
+
+IDS
+Intrusion Detection System
+
+TCP
+Transmission Control Protocol
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+LIST OF FIGURES
+Figure
+Illustration
+Page No.
+
+
+
+
+
+1.1
+System Overview
+3
+
+1.2
+System Behavior
+5
+
+2.1
+TCP Header
+11
+
+4.1
+Waterfall Model
+27
+
+4.2
+Timeline Chart
+30
+
+4.3
+DFD Level – 0
+31
+
+4.4
+DFD Level – 1
+32
+
+4.5
+DFD Level – 2
+33
+
+4.6
+Use case Diagram
+34
+
+4.7
+Sequence Diagram
+35
+
+4.8
+ER Diagram
+36
+
+4.9
+Class Diagram
+37
+
+4.10
+Component Diagram
+38
+
+4.11
+Deployment Diagram
+39
+
+4.12
+State Machine Diagram
+40
+
+
+
+
+
+
+LIST OF TABLES
+Table
+Illustration
+Page No.
+
+
+
+
+
+4.1
+Project Plan
+29
+
+3.1
+Packet Information
+47
+
+3.2
+Network Error
+48
+
+3.3
+IP Configuration
+48
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+APPENDIX
+1. Project completion letter/Internship certificate/joining letter
+(If internship not completed submit project completion form given by dept.)
+2. FTR 1 & FTR 2.
+3. Plagiarism report.
+4. Paper/Patent publication Proof (if applicable)
+
+
+--------------------------------------------------------------------------------
+PATH - documentation\Sample project submission documents\sample_pdf_text.txt
+CODE:
+﻿A PRELIMENERY REPORT ON 
+ 
+SMART FARMING USING MACHINE LEARNING AND DATA ANALYTICS 
+ 
+SUBMITTED TO THE VISHWAKARMA INSTITUTE OF INFORMATION 
+TECHNOLOGY, PUNE 
+IN THE PARTIAL FULFILLMENT OF THE REQUIREMENTS  
+FOR THE AWARD OF THE DEGREE 
+OF 
+BACHELOR OF TECHNOLOGY (COMPUTER ENGINEERING)  
+SUBMITTED BY 
+ 	 	SHARDUL PATHAK                         EXAM SEAT NO. 17U666  	 	ANEESH SAKURE                             EXAM SEAT NO. 17U388  	 	SAGAR MAJGUDE                            EXAM SEAT NO. 21820181  	 	SAGAR MASKE                                  EXAM SEAT NO. U1510600  	 	NIRMIT SINGHAL                             EXAM SEAT NO. 17U001 
+ 
+/  
+ 
+DEPARTMENT OF COMPUTER ENGINEERING 
+ 
+BRACT’S 
+VISHWAKARMA INSTITUTE OF INFORMATION TECHNOLOGY 
+ 
+SURVEY NO. 3/4, KONDHWA (BUDRUK), PUNE – 411048, MAHARASHTRA 
+(INDIA). 
+BRACT’S  
+VISHWAKARMA INSTITUTE OF INFORMATION TECHNOLOGY, PUNE 
+2020 -2021 
+ 
+/ 
+CERTIFICATE 
+This is to certify that the project report entitles 
+ 
+SMART FARMING USING MACHINE LEARNING AND DATA ANALYTICS 
+ 
+Submitted by 
+ 
+ 	 	SHARDUL PATHAK    EXAM SEAT NO. 17U666  	 	ANEESH SAKURE        EXAM SEAT NO. 17U388  	 	SAGAR MAJGUDE       EXAM SEAT NO. 21820181  	 	SAGAR MASKE             EXAM SEAT NO. U1510600  	 	NIRMIT SINGHAL        EXAM SEAT NO. 17U001 
+ 
+is a bonafide student of this institute and the work has been carried out by him under the supervision of  Prof. Yashwant Dongre and it is approved for the partial fulfillment of the requirement of VISHWAKARMA INSTITUTE OF INFORMATION TECHNOLOGY, for the award of the degree of Bachelor of Technology (Computer Engineering).  
+ 
+ 
+(Prof. Yashwant Dongre) 	 	 	 	 	   (Dr. S. R. Sakhare)  
+            Guide   	 	 	 	 	 	 	Head, 
+Department of Computer Engineering                   Department of Computer Engineering 
+ 
+(Dr. Vivek Deshpande) 
+Director,  
+BRACT’s Vishwakarma Institute of Information Technology, Pune-48 
+ 
+Place : Pune Date : 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ACKNOWLEDGEMENT 
+     It gives us great pleasure in presenting the preliminary project report on “Smart Farming using Machine Learning and Data Analytics”.  
+     We would like to take this opportunity to thank our internal guide Prof. Yashwant Dongre for giving us all the help and guidance we needed. We are really grateful to his for his kind support. Her valuable suggestions were very helpful.  
+     We are also grateful to Prof. S. R. Sakhare, Head of Computer Engineering Department, Vishwakarma Institute of Information Technology, for his indispensable support and suggestions.  
+     At last, we are thankful to our parents, who have encouraged and inspired us with their blessings.  
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 	 	 	 	 	 	 	 	 	 	Shardul Pathak  	 	 	 	 	 	 	 	 	 	Aneesh Sakure  	 	 	 	 	 	 	 	 	 	Sagar Majgude  	 	 	 	 	 	 	 	 	 	Sagar Maske  	 	 	 	 	 	 	 	 	 	Nirmit Singhal 
+ 
+ABSTRACT 
+‘Smart farming using machine learning and data analytics’ is a POC intended for betterment of farmers and agriculture in India. Mentioned in the report are the exact goals to be fulfilled by this project – namely, recommendation of the top n crops based on soil properties and environment factors. These take into consideration all the nutrients and micronutrients (around 12 of them) with reference to the soil health card. From these top n crops recommended, the farmer will also be able to know the economically beneficial crop where the model implements price prediction module for the crops.   
+               Also a year round plan will be provided to farmer to maximize his cultivation and earnings through CSM. Besides generic information regarding government schemes or soil testing labs will be provided. The researcher along with these functionalities can access certain datasets that he wants to explore. The researcher can also study the impact of various algorithms on varies data. An add on ‘what if’ scenario will help not only the farmer but also the researcher to play around with various factors and see the variations in results and proceed with decision making accordingly.  
+The literature survey done for the same is mentioned in further parts of the report. Around 7 IEEE papers have been referred to for the study and framing of the problem statement. Loopholes amongst the papers or future work mentioned in them provisioned the project with gap identification and thus trying to resolve the same. We move to the software requirements part where the things necessary to develop the project were understood, studied and tried to accomplish. The system design part provides an end to end idea of what exactly the project would look like. It also mentions the overall architecture of the project and other aspects of software engineering.  
+Project implementation states the overall algorithms used, the equations formed for the project that will yield better results. Also the tools and technologies used or the platforms and environments worked in have been specified.  For a project to be actually stable and accepted in real world scenario it should bypass many test cases. The testing part and for what aspects the project has been tested is stated. The report concludes with the results including a web app portal for farmer and researcher to use which internally is trying to maximize the accuracy of prediction. A lot of things still remain that have to be provisioned through this web app. This gives us the potential for future work and future scope that has been mentioned. Solving a real world problem, this web app can be used for other applications by simply altering the datasets, such applications have been specified     
+Thus an effort in solving a real world problem with a lot of uncertainty in factors affecting it. Also exploration of various front end technologies, back end ones and algorithms done to solve the same. 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Table of Contents 
+ 
+Sr. No. 
+Title of Chapter 
+Page No. 
+
+    01 
+Introduction 
+11 
+
+ 
+1.1 
+Overview 
+11 
+
+ 
+1.2 
+Motivation   
+12 
+
+ 
+1.3 
+Problem Definition and Objectives 	 
+13 
+
+ 
+1.4 
+Project Scope & Limitations  
+13 
+
+ 
+1.5 
+Methodologies of Problem solving 
+14 
+
+02 
+Literature Survey 
+15 
+
+03 
+Software Requirements Specification 
+23 
+
+ 
+3.1 
+Assumptions and Dependencies 
+23 
+
+ 
+3.2 
+Functional Requirements 
+23 
+
+ 
+ 
+3.2.1 
+System Feature 1(Functional Requirement) 
+23 
+
+ 
+ 
+3.2.2 
+System Feature2 (Functional Requirement) 
+23 
+
+ 
+ 
+ 
+…… 
+ 
+
+ 
+ 
+ 
+…… 
+ 
+
+ 
+3.3 
+External Interface Requirements (If Any) 
+24 
+
+ 
+ 
+3.3.1 
+User Interfaces 
+24 
+
+ 
+ 
+3.3.2 
+Hardware Interfaces 
+24 
+
+ 
+ 
+3.3.3 
+Software Interfaces 
+25 
+
+ 
+ 
+3.3.4 
+Communication Interfaces 
+25 
+
+ 
+3.4 
+Nonfunctional Requirements 
+25 
+
+ 
+ 
+3.4.1 
+Performance Requirements 
+25 
+
+ 
+ 
+3.4.2 
+Safety Requirements 
+26 
+
+ 
+ 
+3.4.3 
+Security Requirements 
+26 
+
+ 
+ 
+3.4.4 
+Software Quality Attributes 
+26 
+
+
+ 
+3.5 
+System Requirements  
+26 
+
+ 
+ 
+3.5.1 
+Database Requirements 
+26 
+
+ 
+ 
+3.5.2 
+Software Requirements (Platform Choice) 
+27 
+
+ 
+ 
+3.5.3 
+Hardware Requirements 
+27 
+
+ 
+3.6 
+Analysis Models: SDLC Model to be applied 
+28 
+
+04 
+System Design 
+30 
+
+ 
+4.1 
+System Architecture 
+30 
+
+ 
+4.2 
+Mathematical Model 
+31 
+
+ 
+4.3 
+Data Flow Diagrams 
+32 
+
+ 
+4.4 
+Entity Relationship Diagrams 
+33 
+
+ 
+4.5 
+UML Diagrams 
+33 
+
+05 
+Project Plan 
+36 
+
+ 
+5.1 
+Project Estimate 
+36 
+
+ 
+ 
+5.1.1 
+Reconciled Estimates 
+36 
+
+ 
+ 
+5.1.2 
+Project Resources 
+36 
+
+ 
+5.2 
+Risk Management 
+37 
+
+ 
+ 
+5.2.1 
+Risk Identification 
+37 
+
+ 
+ 
+5.2.2 
+Risk Analysis 
+37 
+
+ 
+ 
+5.2.3 
+Overview of Risk Mitigation, Monitoring, Management 
+37 
+
+ 
+5.3 
+Project Schedule 
+37 
+
+ 
+ 
+5.3.1 
+Project Task Set 
+37 
+
+ 
+ 
+5.3.2 
+Task Network 
+38 
+
+ 
+ 
+5.3.3 
+Timeline Chart 
+38 
+
+ 
+5.4 
+Team Organization 
+38 
+
+ 
+ 
+5.4.1 
+Team structure 
+38 
+
+ 
+ 
+
+
+39 
+
+
+
+5.4.2 
+Management reporting and communication 
+
+
+
+06 
+Project Implementation 
+39 
+
+ 
+6.1 
+Overview of Project Modules 
+39 
+
+ 
+6.2 
+Tools and Technologies Used 
+42 
+
+ 
+6.3 
+Algorithm Details 
+44 
+
+ 
+ 
+6.3.1 
+Algorithm 1 
+46 
+
+ 
+ 
+6.3.2 
+Algorithm 2 
+47 
+
+ 
+ 
+6.3.3 
+… 
+48 
+
+07 
+Software Testing 
+54 
+
+ 
+7.1 
+Type of Testing 
+54 
+
+ 
+7.2 
+Test cases & Test Results 
+57 
+
+08 
+Results 
+67 
+
+ 
+8.1 
+Outcomes 
+67 
+
+ 
+8.2 
+Screen Shots 
+69 
+
+09 
+Conclusions 
+74 
+
+ 
+9.1 
+Conclusions 
+74 
+
+ 
+9.2 
+Future Work 
+75 
+
+ 
+9.3 
+Applications 
+76 
+
+  
+Appendix A: Problem statement feasibility assessment using, satisfiability analysis and NP Hard, NP-Complete or P type using modern algebra and relevant mathematical models. 
+Appendix B: Details of paper publication: name of the conference/journal, comments of reviewers, certificate, paper. 
+Appendix C: Plagiarism Report of project report.  
+ 
+
+ 
+References 
+Thomas 	Noltey, 	Hans 	Hanssony, 	Lucia 	Lo 
+Belloz,”Communication Buses for Automotive Applications” In Proceedings of the 3rd Information Survivability Workshop (ISW2007), Boston, Massachusetts, USA, October 2007. IEEE Computer Society. 
+ 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+CHAPTER 1: INTRODUCTION 
+1.1 OVERVIEW  
+‘Smart farming using machine learning and data analytics’ is a POC intended for betterment of farmers and agriculture in India. Mentioned in the report are the exact goals to be fulfilled by this project – namely, recommendation of the top n crops based on soil properties and environment factors. These take into consideration all the nutrients and micronutrients (around 12 of them) with reference to the soil health card. From these top n crops recommended, the farmer will also be able to know the economically beneficial crop where the model implements price prediction module for the crops.   
+Also a year round plan will be provided to farmer to maximize his cultivation and earnings through CSM. Besides generic information regarding government schemes or soil testing labs will be provided. The researcher along with these functionalities can access certain datasets that he wants to explore. The researcher can also study the impact of various algorithms on varies data. An add on ‘what if’ scenario will help not only the farmer but also the researcher to play around with various factors and see the variations in results and proceed with decision making accordingly.  
+The literature survey done for the same is mentioned in further parts of the report. Around 7 IEEE papers have been referred to for the study and framing of the problem statement. Loopholes amongst the papers or future work mentioned in them provisioned the project with gap identification and thus trying to resolve the same. We move to the software requirements part where the things necessary to develop the project were understood, studied and tried to accomplish. The system design part provides an end to end idea of what exactly the project would look like. It also mentions the overall architecture of the project and other aspects of software engineering.  
+Project implementation states the overall algorithms used, the equations formed for the project that will yield better results. Also the tools and technologies used or the platforms and environments worked in have been specified.  For a project to be actually stable and accepted in real world scenario it should bypass many test cases. The testing part and for what aspects the project has been tested is stated. The report concludes with the results including a web app portal for farmer and researcher to use which internally is trying to maximize the accuracy of prediction. A lot of things still remain that have to be provisioned through this web app. This gives us the potential for future work and future scope that has been mentioned. Solving a real world problem, this web app can be used for other applications by simply altering the datasets, such applications have been specified     
+Thus an effort in solving a real world problem with a lot of uncertainty in factors affecting it. Also exploration of various front end technologies, back end ones and algorithms done to solve the same.   
+1.2 MOTIVATION  
+India being an agricultural country, its economy is mainly and predominantly dependent on agriculture yield growth and also allied agro-industry products. In India, agriculture is essentially influenced by rainwater which is very unpredictable. Growth in agriculture influentially depends on various parameters of soil, namely Nitrogen, Phosphorus, Potassium and various micro nutrients. It also depends on Crop rotation, Soil moisture, soil type, pH, surface temperature, etc and weather aspects like temperature.  
+India now is rapidly progressing towards technical development. Thus, technology will convince to be beneficial to agriculture which can increase crop productivity leading to better yields to the farmer. The proposed project provides an answer for Smart Agriculture by monitoring the agricultural field which may assist the farmers in increasing productivity to an excellent extent.  
+This work presents a system, in a form of a website, which uses Machine Learning techniques in order to predict the most profitable crop based on the current weather, soil conditions, and predicted future market price. The proposed system tries to integrate the information obtained from various repositories, weather departments and by applying machine learning algorithms a prediction of best suited crops consistent with current environmental conditions is made.  
+This provides a farmer with varied options of crops that can be cultivated. Thus, the project generates a system by integrating data from various data sources, and focuses on data analytics, prediction analysis which may improve crop yield productivity and thus increase the profit margins of farmers helping them over a longer run.  
+  
+1.3 PROBLEM DEFINITION AND OBJECTIVES   
+Problem Definition:  
+To apply Data mining and Machine Learning Techniques to solve the problems faced in agriculture domain which will:  
+Provide the farmers with economically most beneficial crops.  
+Provide farmer with options of top n crops suited for his land.  
+Provide farmer a year round plan to maximize profit.  
+Allow farmer and researcher to play along with various inputs, view its impact and proceed with decision making accordingly.  
+Provide the information about various Government Schemes and Soil Testing Laboratories.  
+Provide and allow the researchers to analyse the data.  
+Objectives:  
+To apply Data mining and Machine Learning Techniques to solve the problems faced in agriculture domain.  
+To compare the outputs of various algorithms.  
+To increase the Return on Investment (ROI) for farmers.  
+To study latest Algorithms  
+To provide open source data to researchers  
+  
+1.4 PROJECT SCOPE AND LIMITATIONS 
+   
+Scope:  
+The granularity of average rainfall will be restricted to minimum district level.  
+Recommendation of crops using various soil parameters such as Nitrogen, Phosphorus, Potassium, micro nutrients, Crop rotation, Soil moisture, pH.  
+Other parameters – Surface temperature, soil type and Weather aspects like temperature  
+Not in Scope:  
+The granularity will not be below district level for average rainfall prediction.  
+The cultivation assistance will not be given by the system.  
+Only basic crops will be considered. (Horticulture will not be considered).  
+IOT based sensors will not be used to collect data. Work will be done on data collected directly.  
+Limitations:  
+The farmer must have the nutrients data.  
+This implies he must have a soil health card or should be aware of his land properties.  
+ 
+1.5 METHODOLOGIES OF PROBLEM SOLVING 
+Recognizing the need –   
+Due to the unpredictable environmental factors or price patterns, farmers are unable to decide which crop to cultivate so as to maximize profit. Even if the crop suits his land a lot of it goes waste if there is no market demand. Thus a model was needed to guide the farmer considering his land and environment and price factors.  
+Defining the objectives, problem, constraints –   
+Thus as mentioned in 1.3 and 1.4 are the required points.  
+Collecting information and data –   
+Data required in the project was to train the module for prediction. The data is created by the project members from knowledge set – Various textbooks,  
+Agriculture College Pune’s App, Soil Health cards study, etc. Price data was taken from government sites.  
+Generating alternative solutions –   
+From user’s point of view, he has been given the flexibility to choose amongst the various solutions provided by app – single or alternative crop, or a year round plan. From developing point more than 4-5 algorithms have been explored, considered, implemented to provide alternative solutions.  
+Evaluating the consequence of different solutions –   
+User might choose a solution as per his necessity. Algorithms were evaluated for accuracy and mean errors to improve accuracy and reduce errors.  
+Deciding and specifying final best solution –   
+Farmer should go for economically beneficial or year round plan. Algorithm with highest accuracy used for base model. Researcher can refer to data he needs.   
+ 
+ 
+CHAPTER 2: LITERATURE SURVEY 
+ 
+2.1 BACKGROUND AND DOMAIN 
+India being an agro-based country, its economy mainly depends on agriculture produce growth and related agro-industry products. Indian agriculture largely depends on the rainfall which is highly unpredictable. Farming yield is also largely dependent on diverse and multiple soil parameters, like Nitrogen, Phosphorus, Potassium, Crop cycle, Soil moisture, soil pH, temperature and climatic aspects like temperature, rainfall, etc. Nowadays India is very rapidly progressing towards technical innovation and development. Thus, technology will be beneficial as well as blessing to agriculture which will enhance crop productivity which will result in better yields to the farmer.  
+The proposed project provides an innovative solution for Smart Agriculture by monitoring the soil nutrients and climatic conditions which can assist farmers in increasing productivity to a great extent. This project presents a system, in a form of a website, which uses Machine Learning techniques in order to predict three most suitable crops based on soil parameters and climatic conditions and also most profitable crop based on the predicted future market price. This system integrates the data collected from repository, Weather department and by applying machine learning algorithm a prediction of most suitable crops according to current environmental conditions is made. This will provide farmers with variety of options of crops that can be grown with enhanced yield. Thus, the project develops a system by integrating data from various sources, data analytics, prediction analysis which will improve crop yield productivity and ultimately increase the profit margins of farmers helping them over a longer run.  
+Agriculture  
+Different types of soils have various mineral contents and every crop require multiple mineral components for its better growth. Each and every soil has some specific characteristics and is suitable to grow only a particular number of crops. Therefore an agronomist should be known about the type of soil he has so that he could cultivate better crops. Another important issue that is famers have to face is the uncertainty in the market demand and prices from the time of sow to the time of harvest.  
+Machine Learning  
+Machine Learning is a section of Computer Science where new developments evolve at recent times, and also helps in automating the evaluation and processing done by the mankind, thus reducing the burden on the manual human power. It is a type of Artificial Intelligence that provides devices with the ability to learn without being separately programmed. It gives focus on the development of computer programs that can change when exposed to new data. Finding out the suitable crops based on the soil’s appearance becomes tedious for novice farmers. There also exists a need to prevent the agricultural decay.  
+Data Analytics  
+It is a method of analysing, cleaning, transforming & creating models of data with the aim of finding meaningful and useful information, concluding that information and supporting decision making.  
+Data analytics projects and initiatives support businesses increase revenues, help in improving operational and functional efficiency, responds quickly to emerging market trends and gain a competitive edge over rivals, optimizes marketing campaigns and customer service efforts.  
+2.2 COMPARISON RESEARCH  
+Predictive Analysis to Improve Crop Yield using a Neural Network Model [IEEE 2018]  
+The architecture proposed in this paper provides a computational dimension to enhance knowledge about the yield before the crop sowing period. It provides unique model which performs joint prediction of both rainfall and soil features on the yield, which is also termed as hybrid model. The model reads historic data and learns through computational processes like ARIMA, Exponential Sequencing and Recurrent Neural Networks. It accepts soil features, fertilizer concentration and sowing period from the end user and provides expected yield in tonnes per hectare as output for given parameters. The approach not only promises precise levels of expected yield but also helps determines seasonality trends in the yield of the same crop over different years in the same season. The proposed model is trained only for historic district-wise rainfall data and soil data of Karnataka state and predicts the yield of rice for same.  
+Crop Selection Method to Maximize Crop Yield Rate using Machine Learning Technique [IEEE 2015]  
+An agro-based country depends on agriculture for their economic growth. When the population of a country increases dependency on agriculture also increases and the subsequent economic growth of the country is affected. In this situation, crop yield rate plays a significant role in economic growth of the country. In addition to the biological approaches (eg. Seed quality of crop, crop hybridization) and some chemical approaches (eg. Use of fertilizer, urea, potash) approaches a crop sequencing technique is required to improve net yield rate of crop over season.   
+This paper proposed a new and unique method named Crop Selection Method (CSM) to achieve net yield rate of crops over season. This technique classifies the crops in 4 categories as Seasonal crops (eg. Wheat, paddy), Whole year crops (eg. Vegetables, paddy, toor), Short time plantation crops(eg. Potato, vegetables,  rese), and long-time plantation crops (eg. Sugarcane).Algorithm provides unique combination of these crops that can be selected in a sequence based on yield rate per day as output. Method may improve net yield rate of crops using limited land resources and also increases re-usability of the land.  
+Crop Yield Prediction and Efficient use of Fertilizers [IEEE 2019]  
+The system provides a model precise in predicting the crop yield and also recommendations about the required fertilizers ratio based on soil parameters and atmospheric conditions to maximize the crop yield and farmers revenue. Among the factors for better crop yield, use of fertilizers is also an important factor as it directly affects the fertility of soil. Early detection of problems and providing their solutions will help in better crop yield. This paper predicts the crop yield based on two algorithms (Random Forest Algorithm and Back Propagation Algorithm) and compares the result of two algorithms so that the algorithms with more accuracy and less errors can be used. Also, the system provides the end user with the proper fertilizer ratio to be used to get the desired crop yield.  
+Decision Making Support System for Prediction of Prices in Agricultural Commodity [IEEE 2019]  
+Agriculture commodity prices have a variable nature impacting the profit negatively. Agriculture price prediction has always been a challenging problem for farmers. Farmers are unable to get the desired price for their crops due to which suicide rate is increasing year by year. Different social and economic factors are responsible for fluctuation of prices of agriculture commodity. This paper provides a decision making support model for prediction of prices in agriculture commodity which will help in reducing agribusiness risks. This paper uses soft computing techniques for predicting prices of various crops. Using data mining algorithms paper provides average price prediction for agriculture commodities helping farmers in decision making and ultimately profit making. Graphical comparison of prices of agriculture commodities is provided. The decision model takes previous sell price from farmer and predicts the future price.  
+Prediction of Future Market Price for Agricultural Commodities [International Journal of System and Software Engineering 2015]  
+Agricultural items have seasonal prices. These prices are spread over the year. If these prices are predicted in advance then it will be promising to the farmer on Return on Investment (ROI). The prediction of future market price of price may be valuable for budgetary planning systems for different government agencies. It will help in growth of economy of country like India where main source of income for larger population in agriculture. This paper provides a system which alerts the farmers about the crop he/she can sow such that by the time of harvesting he/she gets better return on investment. The market price of the crop from the time of sowing and harvesting can be uncertain. This paper makes use of neural networks (Neuroph framework) and back propagation algorithm for prediction of future price of the crops. The suggested model has the prediction engine which is the heart of the entire model. The paper provides the results in only graphical format and predicts the prices of only five crops (wheat, bajra, rice, paddy and jowar)  
+CROP PREDICTION USING PREDICTIVE ANALYTICS [IEEE 2017]  
+Theme:  
+In this paper, the author mainly focuses on aggregating various papers and further utilizing them to develop a model to predict suitable crops, crop yield and recommending fertilizers (future scope).  
+Model:  
+NPK sensors will be utilized to sense the nutrients data from soil. This data will be used to predict the best suitable crop based on soil nutrients. Further Agro algorithm will be used to predict the yield rate where climatic conditions will also be taken into consideration. Mining techniques will be applied over agricultural soil that will generate advisory reports to facilitate decisions like crop rotation, fertilizer requirements (future scope)  
+Performance Evaluation:  
+Farmers will be able to grow crops suitable as per soil on their land and basic climatic conditions. If Agro algorithm used, data can also be directly gathered through HDFS if sensors not present. Crop and crop yield will be predicted. Whereas the fertilizers to be recommended will be based on suitable crop selected.  
+Advantages:  
+This paper integrates the work of various authors in one place which helps the researcher to understand the current scenario in agriculture and data mining and further helps farmers to choose the correct beneficial crop and thus enhance agricultural economy.  
+Disadvantages:  
+The prediction is based on atmosphere which would not be accurate, as the climatic conditions may differ.  
+  
+7. Recommendation System for Crop Identification and Pest Control Technique in Agriculture [IEEE 2019]  
+Theme:  
+In this paper, the authors have developed a system that will recommend a suitable crop specifically focusing on a particular targeted small region considering soil and its parameters and some other parameters. Also, the system will target pest removal techniques and help the farmer similarly. An existing paper that selected the crop based on soil properties was used for reference.  
+Model:  
+Most suitable crop for a particular land based on its soil properties will be recommended. The attributes will include soil colour, pH, average rainfall and temperature. The crops considered in the model includes bajra, cashew nut, chickpea, coffee (Arabica), coffee (white robusta), cotton, jowar, jute, pulses, ragi, rice, sesame seed, sugarcane, tea, wheat. In this model, authors have used various classification models like linear SVM algorithm and decision tree to predict the crop. After applying both the algorithms, it was found linear SVM was predicting more accurate results.  
+Performance Evaluation:  
+The data sets which were openly available were used. The model provides up to 89.66% of accuracy. Algorithms based accuracy included Decision Tree providing  
+86.80% accuracy, KNN – 88.00 %, SVM – 89.66 %.  
+Advantages:  
+This paper provides an accurate prediction of the crops suitable for the farmers land based on factors like soil, average rainfall. Pest removal technique is also given.  
+Disadvantages:  
+The prediction is yet to be developed for more soil attributes and with larger dataset.  
+Title 
+Abstract 
+Base Parameters 
+Techniques 
+Limitatio ns 
+Future Scope 
+
+Predictive Analysis to Improve Crop 
+Yield using a  
+Neural Network 
+Model 
+The proposed hybrid Neural 
+Network Model  identifies optimal combinations of soil parameters and blends it with the rainfall pattern in a selected region to evolve the expectable crop yield. 
+NPK ( in tonnes per hectare ), pH , Yield of Rice (Qrice) in Tonnes per  
+Hectare,Rainfall (monthly as well as  annual rainfall in  
+mm) 
+Recurrent Neural Networks 
+The study  is  
+performe d on smaller dataset and only on rice. 
+Accuracy of model can be compared by using larger and newer data inputs that take into account the realtime fluctuations in the climatic and soil conditions due to unfortunate events like cyclones, landslides, floods, etc. 
+This data centric model reliant on collected data can be sophisticated by  introducing Wireless Sensor Networks at real-time to collect and transform data directly to predictive models, unlike the existing process of bulk collection and feed via datasets. 
+
+  
+Crop Selection  
+Method to  
+Maximize Crop  Yield Rate using  
+Machine Learning 
+Technique  
+If there is more than one option to plant a crop at a time using limited land resource, then selection of crop is a puzzle. This paper proposed a  method named  
+Crop Selection Method (CSM) to solve crop selection problem, and maximize net yield rate of crop over season and subsequently achieves maximum economic growth of the country. 
+Crop, their sowing time, plantation days and predicted  
+yield rate for the season 
+SVM, KNN,  
+Decision trees,  
+Random Forest,  
+Regularized  Greedy Forest  
+(RGF) 
+Performance accuracy of CSM method depends on predicted value of influenced parameters. 
+NA 
+
+Crop Yield Prediction and  
+Efficient use of  
+Fertilizers 
+Prediction of suitable crop along with  
+recommendations regarding fertility ratio to increase crop yield and revenue 
+Crop Prediction – crop, area, season, crop year, state,  district Fertilizer 
+Quantity of  
+Nitrogen,  
+Phosphorus,  
+Potassium in soil. 
+1.Random Forest 
+Algorithm 
+2.Backpropogation Algorithm 
+Paper does not take into consideration other soil factors as pH, humidity. 
+In future developing the web application based on this ideology and make the user use this easily and help the user to 
+understand the yield of the crop, he is going to crop in that season.    
+
+Title 
+Abstract 
+Base  
+Parameters 
+Techniques 
+Limitations 
+Future Scope 
+
+Decision Making  Support System for Prediction of Prices  in Agricultural  
+Commodity  
+Using data mining algorithms paper provides average price prediction for agriculture commodities helping farmers in decision 
+Previous Year’s crop market price. 
+Average Prices based upon previous prices is calculated 
+Paper considers only previous year prices.  
+Prediction based on historical data will be done. 
+
+
+making and ultimately profit making. 
+
+
+
+
+
+Prediction of Future  
+Market Price for  
+Agricultural  
+Commodities  
+Paper provides a system which alerts the farmers about the crop he/she can sow such that by the time of harvesting he/she gets better return on investment. The market price of the crop from the time of sowing and harvesting can be uncertain. 
+Large Historical data about crop price 
+Neuroph Neural  
+Network, 
+Back-propagation  
+Algorithm 
+Data represented in only comparative graphical format understood by agroexperts and price prediction is done for only five crops – wheat, 
+jowar, bajra, rice, 
+paddy 
+Web-based personalised application will be created for farmers. 
+
+CROP  
+PREDICTION  
+USING  
+PREDICTIVE  
+ANALYTICS 
+The author mainly focuses on aggregating various papers and further utilizing them to develop a model to predict suitable crops, crop yield and  recommending  
+fertilizers(future scope) 
+. 
+Nitrogen,  
+Phosphate, Potassium contents in the soil. 
+Bayesian algorithm, Agro algorithm 
+The prediction is based on atmosphere which would not be accurate, as the climatic conditions may differ. 
+Information about pesticides will be added to the crop. 
+
+Recommendation  
+System for Crop  
+Identification and  
+Pest Control 
+Technique in  
+Agriculture 
+The authors have developed a system that will recommend a suitable crop specifically focusing on a particular targeted small region  considering soil and its parameters and some other parameters. 
+Soil color, pH, average rainfall and temperature. 
+Linear SVM algorithm (better results) and decision tree 
+Only a small region can be considered. On bigger areas or data sets the model is inaccurate. 
+Aims at developing this model with more soil attributes  and with larger data set. 
+
+  
+Figure 2.1 Research Comparison   
+  
+  
+ 
+ 
+ 
+ 
+CHAPTER 3: SOFTWARE REQUIREMENTS SPECIFICAT IONS  
+ 
+3.1 ASSUMPTIONS AND DEPENDENCIES  
+Assumptions:  
+The farmer must have the nutrients data.  
+This implies he must have a soil health card or should be aware of his land properties.  
+Presently the client lies in the same network as that of the server.  
+Dependencies:  
+Mobile devices to run the web app.  
+  
+3.2 FUNCTIONAL REQUIREMENTS  
+For Open User – Farmer:  
+3.2.1 System Feature 1:   
+Top n crops prediction based on land properties and environmental factors  
+The user should be able to give soil parameters as input to the system and get the top n crops best suited for his land and region.  
+The user should be able to get the visualisation of comparative analysis of predicted top n crops  
+3.2.2 System Feature 2:   
+Economically most beneficial crop prediction based on future market price of the top n predicted crops  
+The user should be able to get prices of all the top n crops and thus choose economically beneficial crop.  
+The user should be able to get the visualisation of comparative analysis of predicted economically beneficial crops.  
+3.2.3 System Feature 3:  
+Handling the ‘what if’ scenario  
+The user can vary the environmental parameters and should be able to analyse different scenarios.  
+3.2.4 System Feature 4:  
+Soil laboratories section  
+The user should be able to get the information related to nearby soil laboratories.  
+3.2.5 System Feature 5:  
+Government Schemes section  
+The user should be able to get the information related to different government schemes and various training programmes for modern farming.  
+3.2.6 System Feature 6:  
+Crop Selection Method  
+The user should be able to view a year round plan for cultivation on his land and thus should be able to maximize profit.  
+  
+For Secured User – Researcher:  
+Along with the above 3.2.1 to 3.2.6 features included, further ones:  
+3.2.7 System Feature 7:  
+Log in to the system   
+The user should be able to sign up to the system.  
+The user should be able to log in to the system.  
+3.2.8 System Feature 8:  
+Datasets availability and study  
+The user should be able to analyse, visualize, compare, and study various datasets.  
+The user should be able to view and download the open source datasets.  
+The user should have an access to the necessary knowledge through textbooks on agriculture and the sources of such knowledge sets.  
+  
+3.3 EXTERNAL INTERFACE REQUIREMENTS  
+3.3.1 User Interface Requirements  
+Django Framework  
+REST API  
+3.3.2 Software Interface Requirements  
+Machine Learning API Python  
+  
+3.4 NON-FUNCTIONAL REQUIREMENTS   
+3.4.1 Performance Requirements  
+90% of the responses should be within 10 seconds.  
+The system will be able to handle and accept requests from 10 users currently as a prototype but the system will be scaled up scaled up to handle increase of users with no major functionality change and with permissible downtime.  
+User awaiting response from the system upon giving inputs should be between 10 – 20 seconds.  
+Unacceptable response time is 1 minute or more than that.  
+3.4.2 Safety Requirements  
+The system should not disclose the personal data of the user.  
+The system should not disclose the datasets to the users not registered as researchers in the system.  
+3.4.3 Security Requirements  
+The system should be protected against any unauthorized access to the system.  
+Authentication of the user should be done before providing access to the data.  
+The Username and password should be validated before giving access to the data.  
+Unauthorized modification/creation/deletion of the data should be protected.  
+SQL Injection needs to be prevented.  
+3.4.4 Software Quality Attributes  
+Usability :  
+The website should be designed for ease of non-technical users.  User should be able to access the website from any device so the website should be responsive.  
+Reliability:  
+The system should be tested for all the cases to provide user with a reliable service.  
+Availability:   
+The system should be up and running and must be available 24*7 and user should be able to access the system from anywhere.   
+The system should re-initiate immediately in case of any failures   
+Maintainability:  
+All the system design requirements, programmes and other datasets should be well documented.  
+The backup of the database should be taken at regular intervals by the system administrators.  
+Portability  
+The user should be able to access the data downloaded/viewed by using cross platform.  
+Interoperability   
+The system will interoperate with other governments’ websites for collecting information about various schemes available.  
+  
+3.5 SYSTEM REQUIREMENTS  
+3.5.1 Database Requirements  
+SQLite  
+CSV data files  
+3.5.2 Software Requirements  
+Necessary Packages  
+Scikit-learn  
+From sklearn.tree import DecisionTreeClassifier classifier=DecisionTreeClassifier (criterion=’entropy’, random_state=0) classifier.fit (X_train, Y_train)   
+TensorFlow  
+	import 	tensorflowoptimizer 	= 
+tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost)  
+Keras  from keras.models import Sequential from keras.layers import Dense 
+model=Sequential() model.add(Dense()) model.compile() model.fit()  
+Django  from  resen.http import HttpResponse  
+from  resen.urls import path from  resen.db import models import os import sys def main():      os.environ.setdefault(‘DJANGO_SETTINGS_MODULE’, ‘first.settings’)     try:          from  resen.core.management import execute_from_command_line     except ImportError as exc:  
+        raise ImportError(  
+            “Couldn’t import Django. Are you sure it’s installed and “  
+            “available on your PYTHONPATH environment variable? Did you “  
+            “forget to activate a virtual environment?”          ) from exc  
+    
+execute_from_command_line(sys.argv) if __name__ == ‘__main__’:     main()  
+Environments  
+Jupyter – Keras, TensorFlow  
+WEKA – Basic Visualizations,  Pre-processing, Implementations.  
+Spyder – Scikit  
+Rapid Miner – Pre-processing  
+LUCID – Design Modelling  
+Framework   
+Django Framework – Web App Development  
+APIs –  
+Machine Learning Python API  
+  
+3.6 ANALYSIS MODELS: SDLC  
+Software development life cycle for the proposed project went through the following phases:  
+Requirements Gathering:  
+The requirements for the project started right from the basics to see if the problem is really worth solving. Thus various agriculture colleges were visited to gather the requirements. The requirements mostly included precision in the prediction as, though existing models can be seen, most of them fail to provide accurate results. The data required for the same was gathered in the form of knowledge set through agriculture college textbooks and official app. The technical requirements of platform, technologies, etc were decided through discussions with the guide.  
+Analysis:  
+The results from the existing models failed due to the uncertainty in environmental conditions and lack of parameters considered for prediction. Thus it was decided to consider parameters that would yield a better result. Help of Soil Health Card was taken to analyse and construct the schema for training dataset. Dataset was generated from the knowledge set by study and analysis. A lot of papers through literature survey also helped to analyse the gaps that could be worked upon for a better model.  
+Plan and Design:  
+Thus the software design was generated that included the software architecture, all the necessary UML diagrams, and schemas for data and the modules that would be provided through the web app. Key deliverables of the app were decided and usage of algorithms, technologies, platforms, language, database, etc were also decided. The layout of the app and its interface were proposed. A plan was thus sketched.  
+ 
+Build:  
+Actual coding required was done. This included machine learning algorithms execution, front end codes – for static and dynamic web pages, machine learning codes API generation, etc  
+Test:  
+The generated web app was tested and validated for various situational inputs. This included mostly usability testing, security testing, maintainability testing, scalability testing, login testing, database testing, compatibility testing, etc  
+Deploy:  
+Presently the app is deployed as client server architecture with clients residing in the same network as that of the server. Further deployment on cloud for access over the internet is planned.  
+Maintain:  
+Check for bugs and tackling them is planned when will be needed. The system would be maintained for its availability, security, usability, scalability, and any updates based on users demand would be tried to fulfil.  
+  
+  
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+CHAPTER 4: SYSTEM DESIGN  
+4.1 SYSTEM ARCHITECTURE  
+/ 
+Figure 4.1 System Architecture  
+  
+ 
+ 
+ 
+ 
+ 
+ 
+4.2 DATA FLOW DIAGRAMS  
+ 
+/
+  
+  
+  
+  
+  
+  
+  
+4.3 ENTITY RELATIONSHIP DIAGRAMS  
+      Version 1 -   
+/   
+Figure 4.2 Entity Relationship Diagram  
+  
+  
+  
+ 
+4.5 UML DIAGRAMS  
+4.5.1 Use Case Diagrams  
+Use Case 1:  
+  
+
+  
+/ 
+Figure 4.3 Use Case 1  
+  
+ 
+ 
+ 
+Use Case – 2  
+/ 
+Figure 4.4 Use case 2  
+  
+ 
+ 
+  
+4.5.2 Activity Diagram  
+/    
+Figure 4.5 Activity Diagram  
+  
+CHAPTER 5: DATASETS 
+ 
+For this project majorly 2 datasets have been used, first one is based on soil nutrients and climatic conditions required for crop and second one is market price dataset used to predict future market price for crops.  
+5.1 Soil nutrient and climatic factors for crop dataset:  
+Many researchers nowadays are working on crop recommendation and crop prediction problem despite of that finding data related to this was the biggest hurdle we faced during our project.  
+The major focus of our project was to include climatic conditions as well as all the major soil parameters for crop recommendation because no model yet includes them all together for multiple crops. Hence, no readymade dataset was available to us. We made use of the available knowledge sets to build our final dataset which includes all the necessary soil parameters as well as climatic factors.  
+/ 
+  	  	  	  	  	Figure 5.1 Crop Dataset  
+The next important question to discuss is why we have chosen only these particular soil parameters. During our research work in the early phase of our project we came across the concept of soil testing. We came to know that lot of soil testing laboratories have been set up by government as well as by some private institutions which performs the analysis of soil and give details of that analysis in the form of SOIL  HEALTH CARD to famers.  
+  
+  
+  
+  
+/ 
+  	  	  	  	 Figure 5.2 Soil Health Card  
+5.2 Soil Health Card:  
+It is a Government of India’s scheme promoted by the Department of Agriculture and  Co-operation under the Ministry of Agriculture and Farmer’s welfare. The scheme is being implemented by the Department of Agriculture of all the State and Union Territory Governments. A Soil Health Card gives farmer soil nutrient status of his holding and advices him on the usage of fertilizers and also the needed soil amendments, that he should apply to maintain soil health.  
+A printed report of Soil Health Card has the status of soil having 12 parameters, namely N, P, K (Macro-nutrients) Fe, Cu, S, Zn, Mn, Bo (Micro-nutrients); and EC, pH, OC (Physical parameters). We wanted to include all the major factors that influence the crop suitable for particular soil type hence we had to consider all these 12 factors along with type of soil average rainfall, temperature of that region.  
+5.3 Market Price Prediction Dataset:  
+For future price prediction, the dataset is collected from agmarknet.nic.in which is a government website providing users with prices of crops. It has district wise price distribution having minimum price, maximum price and modal price.   
+/ 
+  	  
+  	Figure 5.3 Price Dataset  
+5.4 CSM Dataset:  
+The third dataset that we are using is csm_dataset for Crop Selection Method algorithm. This dataset contains the sowing period, harvesting period, growth period, and predicted yield rate of crop.  
+/ 
+  	  	  	  	  
+  	  	  	  	Figure 5.4 CSM Dataset  
+  
+    
+  
+ 
+CHAPTER 6: PROJECT IMPLEMENTATION  
+ 
+6.1 OVERVIEW OF PROJECT MODULES  
+Module 1:  
+Prediction of best suitable n crops based on land and environmental factors.  
+  
+/
+  
+  
+  
+  
+ 
+   
+Module 2: 
+Predicting future market prices of best suitable crops  
+ 	/	  
+Module 3:  
+Recommending the economically most beneficial crop  
+Top n crops predicted based on land properties 
+Model for calculating future profit for that crop  
+Recommendation of economically best crop 
+  
+  
+   
+Module 4: 
+Government schemes display  
+/
+  
+Module 5:  
+Soil testing labs display  
+/
+  
+Module 6:  
+Datasets and textbooks availability to researcher  
+/
+ 
+ 
+ 
+ 
+   
+Module 7: 
+Crop Selection Method  
+/
+  
+Module 8:  
+What if scenario Visualization of  
+/
+  
+6.2 TOOLS AND TECHNOLOGIES USED  
+6.2.1 Language 
+Python is the chosen language by the team for implementation of machine learning and data analytics algorithms as well as for UI development (Django). Python is mostly considered as the suitable language for ML (Machine Learning). The reasons behind this include:  
+It’s a simple language to learn i.e to learn new aspects of it. As compared to languages like c, cpp and Java the syntax is simpler, clearer, indented and Python also consists of a lot of code libraries to utilize which are easy to use.  
+The data handling and management capacity is great.  
+Open Source – Python is gaining momentum and getting popular in the Analytics domain since language is open source.  
+Capability of interacting and interfacing with almost all available third party languages and various platforms.  
+The packages and libraries that will be used and its sample instance is provided:  
+Pandas: Pandas will be used to load the data, and compare the values predicted and expected majorly. Further it includes n number of functionalities that will be utilized.  Mydata=pd.read_csv(rD:\Python\SmartFarmingMulRegression\cropdata.csv) compare=pd.DataFrame({Actual:Ya,Predicted:Yp})  
+Matplotlib.pyplot: Will be used for data visualization. A simple instance of plotting a graph can be:  
+compare.plot(kind=&#39;bar&#39;,figsize=(10,8)) plt.grid(which=&#39;major&#39;,linestyle=&#39;&#39;,linewidth=&#39;0.5 
+&#39;,color=&#39;green&#39   plt.grid(which=&#39;minor&#39;,linestyle=&#39;:&#39;,linewidth=&#39;0. 
+5&#39;,color=&#39;black&#39   plt.show()  
+Numpy: Dealing with numbers.  
+Scikit Learn – To implement various algorithms and compare the results accordingly.  
+The logic for training and testing is in built and can be thus used for various datasets implementing various algorithms. Considering example of decision tree:  from sklearn import DecisionTreeClassifier  classifier=DecisionTreeClassifier  
+(criterion=’entropy’, random_state=0)   classifier.fit (parameters, class label)  
+Keras – Another package for machine learning.  
+	From 	keras.models 	import 	Sequential 	from 	keras.layers 	import 	Dense 
+model=Sequential() model.add(Dense()) model.compile() model.fit()  
+Tensor Flow import tensorflow  
+ 	optimizer  	=  
+tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost)  
+Metrics to compare efficiency of various algorithms implementation:  
+Mean absolute Error  
+Mean Square Error  
+Root Mean Squared Error  
+These can be determined by various number of ways, tools and mechanisms.  
+Considering an example of scikit:  from sklearn import metrics metrics.mean_absolute_error(actual,predicted)  
+6.2.2 Environment:  
+Anaconda Navigator (Jupyter) – Keras, TensorFlow  
+WEKA – Basic Visualizations, Preprocessing, Implementations.  
+Anaconda Navigator (Spyder) – Scikit  
+RapidMiner – Preprocessing  
+LUCID – Design Modelling  
+6.2.3 Framework:  
+Django Framework – Website Development  
+6.2.4 APIs  
+Machine Learning API – Python  
+ 
+6.3 ALGORITHM DETAILS  
+Basics of the algorithms explored:  
+Machine Learning  
+Machine Learning is a section of Computer Science where new developments evolve at recent times, and also helps in automating the evaluation and processing done by the mankind, thus reducing the burden on the manual human power. It is a type of Artificial Intelligence that provides devices with the ability to learn without being separately programmed. It gives focus on the development of computer programs that can change when exposed to new data. Finding out the suitable crops based on the soil’s appearance becomes tedious for novice farmers. 
+There also exists a need to prevent the agricultural decay.  
+Neural Networks.  
+The Neural Networks Model (NNM) is used to consider the functionality of nonlinear data. The model shows the capability to learn as it follows comparable data processing structure. These techniques provide successful results by applying on many problems like classification, control and prediction like a biological brain. The model is dissimilar to both classification model as well as decision tree due to its factor of likely hood prediction. The neural network has many techniques which has merits and demerits. The research suggests neural network to be better than decision tree and regression analysis model used in churn prediction.  
+Decision Tree.  
+The decision tree is one of the most prominent predictive models that are used for the churn prediction based on classification. The decision tree consists of two steps:  
+Tree building.  
+The training data set is recursively partitioned according to values of the attributes.  
+This process continues till there are no partitions left having identical values.  
+Tree pruning.  
+Here some values may be removed from the data which is noisy data. The largest found out error rate branches are selected and further removed in pruning. To predict accuracy and reduce complexity of decision tree is thus called tree pruning.  
+Data Analytics  
+It is a method of analysing, cleaning, transforming & creating models of data with the aim of finding meaningful and useful information, concluding that information and supporting decision making.  
+Data analytics projects and initiatives support businesses increase revenues, help in improving operational and functional efficiency, responds quickly to emerging market trends and gain a competitive edge over rivals, optimizes marketing campaigns and customer service efforts.  
+6.3.1 Algorithm 1:  
+WEKA implementation – Multiple Linear Regression  
+Open Explorer tab of WEKA tool.  
+Select the data file to preprocess and click on preprocess start.  
+Move on to the classification tab.  
+From ‘Functions’ option select ‘Linear Regression’  
+Choose ‘Supplied Test Set’ to apply algorithm on data you supply externally.  
+Select the same data file preprocessed.  
+Click on ‘Start’ option.  
+Analyze the results.  
+6.3.2 Algorithm 2: 
+WEKA implementation – Random Forest  
+Open Explorer tab of WEKA tool.  
+Select the data file to preprocess and click on preprocess start.  
+Move on to the classification tab.  
+From ‘Trees’ option select ‘Random Tree’  
+Choose ‘Supplied Test Set’ to apply algorithm on data you supply externally.  
+Select the same data file preprocessed.  
+Click on ‘Start’ option.  
+Analyze the results.  
+Visualize the tree by right clicking on algorithm file name.  
+/  
+  
+ 	 
+  
+6.3.3 Algorithm 3: Multiple Linear Regression  
+SCIKIT implementation – Multiple Linear Regression  
+Import required packages – pandas, sklearn, numpy, matplotlib.  
+Load the data file using pandas  
+Initialize the input parameters and class label.  
+Split the data file into training and testing tuples using train_test_split method of sklearn.model_selection  
+Preprocess the data by scaling its values within a defined range using MinMaxScaler method of sklearn.preprocessing  
+Use the linear regression method of sklearn.linear_model  
+Train the system using learner=teacher.fit(training parameters,class label)  
+Predict the result using Yp=learner.predict(test data)  
+Compare the data and find errors in model using sklearn.metrics and pandas.Dataframe method  
+Plot the actual and predicted values difference using matplotlib.  
+/  
+  
+  
+  
+6.4.4 Algorithm 4: Decision Tree 1 Concept:  
+/  
+Figure 6.1 [10]  
+Algorithm:  
+Compute the entropy for data-set  
+for every attribute / feature:  
+calculate entropy for all categorical values  
+take average information entropy for the current attribute  
+calculate gain for the current attribute  
+Pick the highest gain attribute.  
+Repeat till we obtain the tree we want.  
+         
+SCIKIT implementation – Decision Tree  
+Import required packages – pandas, sklearn, numpy, matplotlib.  
+Load the data file using pandas  
+Initialize the input parameters and class label.  
+Split/Separate the datafile into testing and training  tuples using train_test_split method of sklearn.model_selection  
+Preprocess the data by scaling its values within a defined range using MinMaxScaler method of sklearn.preprocessing  
+Use the decision tree classifier method of sklearn.tree  
+Train the system using learner=teacher.fit(training parameters,class label)  
+Predict the result using Yp=learner.predict(test data)  
+Compare the data and find errors in model using sklearn.metrics and pandas.Dataframe method  
+Plot the actual and predicted values difference using matplotlib. 
+6.4.5 Algorithm 5: K nearest Neighbours Classifier  1 Algorithm:  
+Load the data  
+Initialise the value of k  
+For obtaining the predicted class, iterate from one to total number of training data points  
+Calculate the difference or distance between the test data and each row of training data using say different metrics like Euclidean distance.  
+Sort all the distances calculated in ascending order based on distance values  
+Get the top k rows from the array which was sorted.  
+Get the most frequent class of these sorted rows.  
+Return the predicted class  
+  
+2 SCIKIT implementation – K Nearest Neighbours Classifier  
+Import required packages – pandas, sklearn, numpy, matplotlib.  
+Load the data file using pandas  
+Initialize the input parameters and class label.  
+Split the data file into training and testing tuples using train_test_split method of sklearn.model_selection  
+Preprocess the data by scaling its values within a defined range using MinMaxScaler method of sklearn.preprocessing  
+Use the k neighbors classifier method of sklearn.neighbors  
+Train the system using learner=teacher.fit(training parameters,class label)  
+Predict the result using Yp=learner.predict(test data)  
+Compare the data and find errors in model using sklearn.metrics and pandas.Dataframe method  
+Plot the actual and predicted values difference using matplotlib.  
+  
+ 
+ 
+6.4.6 Algorithm 6: Logistic Regression   
+SCIKIT implementation – Logistic Regression  
+Import required packages – pandas, sklearn, numpy, matplotlib.  
+Load the data file using pandas  
+Initialize the input parameters and class label.  
+Split the data file into training and testing tuples using train_test_split method of sklearn.model_selection  
+Preprocess the data by scaling its values within a defined range using MinMaxScaler method of sklearn.preprocessing  
+Use the logistic regression classifier method of sklearn.linear_model  
+Train the system using learner=teacher.fit(training parameters,class label)  
+Predict the result using Yp=learner.predict(test data)  
+Compare the data and find errors in model using sklearn.metrics and pandas.Dataframe method  
+Plot the actual and predicted values difference using matplotlib.  
+6.4.7 Algorithm 7: CSM (CROP SELECTION METHOD)  
+ In agriculturally based country like India agricultural planning plays very important role in increasing net yield rate of crops and ultimately economic growth of country.Net yield rate of crops is influenced by two types of factors, first is seed quality which can be improved using hybridization technology and the second one is appropriate selection of crops based on the conditions.  
+CSM as its name says is crop selection method or crop sequencing technique which helps to improve net yield rate of crop by maintaining the nutrients in the soil naturally by selecting the appropriate crop cycle. Algorithm works on prediction of crop yield rate based on favorable condition in advance and gives a sequence of crops with highest net yield rate. It takes crop, their sowing time, plantation days and predicted yield rate for the season as input and finds a sequence of crops whose production per day are maximum over season.  
+  
+Algorithm : cropSelector(presentTime)  if presentTime ≥ End of Season then  return 0   end if else  if presentTime= sowingTime then  return cropSelector(presentTime + 1)   
+end if else   
+cropSowingTable←cropInputTable( resent ime)  
+ L: crop ← max{crop →prRate / crop → plantationDay}  crop / cropSowingTable  
+if (presentTime + crop → platationDay) ≥ End of Season then  
+ //remove crop from cropSowingTable  cropSowingTable ← cropSowingTable – crop  if cropSowingTable is NULL then  return cropSowingTable(presentTime + 
+1)   end if else  go to L end   
+else end if else  update(OutputcropTable, crop)  
+ 	 npr  	←  	(crop  →  	prRate  +  cropSelector(presentTime  	+  
+crop→plantationDay))   return npr  end else   
+         end else end  else end cropSelector  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+ 
+ 
+CHAPTER 7: SOFTWARE TESTING 
+ 
+7.1 TYPE OF TESTING  
+7.1.1 LOGIN TESTING  
+/ 
+  
+  
+/   
+7.1.2 USABILITY TESTING:  
+Web site content should be correct and should not have any spelling and grammatical errors  
+All fonts should be same and linear.  
+Text should be correctly aligned.  
+All the error messages should be shown correctly and the message should be printed clearly to be understood by the user.  
+Clear spaces should be provided in between columns, rows, field labels and error messages.  
+Home Page tag/link should be there on every page so that it is accessible from every page  
+There should be no broken links and images.  
+Messages having conforming information should be shown for all of update and delete operation.  
+Check the site on different resolutions (640 x 480, 600x800 etc.?).  
+Vertical and horizontal scroll bar should appear only if it is necessary.  
+If there is an error message on submit, it should be clearly mentioned with a refreshed page.  
+Title and Logo of the project should be displayed on each web page.  
+All fields (Textbox, dropdown, radio button etc) and buttons should be accessible by keyboard shortcuts and the user should be able to perform all operations by using a keyboard.  
+  
+7.1.3 COMPATIBILITY TESTING  
+Test the compatibility of website with different browsers (IE, Firefox, Chrome, Safari etc) and make sure that the website is displaying the content correctly.  
+Ensure that the HTML version being used is compatible all browser versions.  
+Test the images and videos if any are displayed correctly in all browsers.  
+Test the text and fonts are usable in all browsers.  
+Ensure that the script code is usable in all browsers.  
+7.1.4 DATABASE TESTING  
+The database name should be same as the specifications and given accordingly.  
+Test the Tables, columns, column types and defaults and everything is matching with the required specifications.  
+Test if the column allows a null entry or not.  
+Test the parameters and see if they are required.  
+Test the stored procedures and functions by deleting some parameters  
+  
+Test if the data gets properly saved into the database after the each page submission and also wrong data is not getting submitted.  
+ 
+Verify if the data DML operations are performed.  
+Verify the data being stored in database is encrypted.  
+Verify the database size being used.  
+Verify that the data shown in the front end and back end are same.  
+Verify if the data is valid by inserting the invalid data like invalid username/email in the database.  
+7.1.5 SECURITY TESTING  
+Test if the web page which contains crucial data like passwords should be submitted via HTTPS (SSL).  
+Test if the important information like password should be stored in encrypted format.  
+Test if password restrictions are implemented on all authentication pages like Registration, forgot password, change password.  
+Test if the password is changed the user is not able to login with the old password.  
+Verify if the user is logged out from the system, he/she should not be able to redirect to that page with back button. Ask for resubmission of the login details.   
+Test to access the secured web pages directly without login.  
+Verify if the “View Source code” option is not enabled and the source code should not be visible to user.  
+Verify the cookies should not store passwords.  
+Test if a functionality is not working, the site should not display server, or database information. Instead, it should display the custom error page.  
+Verify the site is not vulnerable to SQL injection attacks.  
+Verify the user roles & rights and page access given to them.  
+  
+7.2 TEST CASES AND TEST RESULTS  
+7.2.1. Web page contents are correct without any spelling mistake or grammatical  errors     and also ‘Home Page’ link is provided on each and every page. Title and logo are displayed on each web page. For the form, spaces and labels between titles and text boxes are provided. There are no broken links or images on the site.  
+  
+/ 
+  
+ 	  	  	  	Figure 7.1 Home tag on every page  
+    
+  
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+7.2.2. The site is responsive and works on different browsers like Chrome, Internet Explorer etc.  
+  
+Chrome Browser:  
+/ 
+ 	  	  	  	  	Figure 7.2 Site on Chrome browser  
+Internet Explorer:  
+/ 
+Figure 7.3 Site on Internet Explorer  
+  
+  
+7.2.3. The site is completely responsive and can be accessed using any mobile device and PCs.  
+All the components, menus, text, images are responsive and are adjusted according to the device’s resolution. Following screenshots show that site can be opened through multiple devices having different screen resolutions.  
+  	  
+      7.2.3.1. Laptop:  
+  
+/ 
+  	  	  	  	  	  
+ 	  	  	  	  	   Figure 7.4 Site on laptop  
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+7.2.3.2. Mobile (Resolution – 360 * 640):  
+/ 
+    	  	  	   
+                                       Figure 7.5 Site on Mobile Phone 
+7.2.3.3. Ipad/ Tab (Resolution – 768 * 1024):  
+  
+/   
+ 
+ 	  	  	  	Figure 7.6 Site on Ipad/Tab  
+7.2.3.4. Mobile Menu Expand:  
+/ 
+  	  	  	  	  	    
+Figure 7.7 Menu Expansion 
+  
+7.2.4. The user is able to login to the system only with valid credentials and the error message is shown if the user tries to login with wrong username or password. If the user enters a wrong username –   
+/ 
+/
+  
+7.2.5. While signing in user won’t be able to repeat the username or email that is already used. If any user tries to enter the same username or email, he/she will be given an error message that email or username is repeated.  
+/
+/
+  
+7.2.6. If user enters different passwords in ‘Password’ and ‘Confirm Password’ fields then he/she will be notified with an error message.  
+/
+ 
+ 
+ 
+ 
+ 
+7.2.7. The site provides prevention from SQL Injection Attack.   
+/
+7.2.8. Passwords are encrypted using hashing while getting stored in the database.    Passwords are stored securely using hashing   
+/ 
+ 
+ 
+ 
+CHAPTER 8: RESULTS 
+  
+8.1 OUTCOMES AND SCREENSHOTS  
+8.1.1 Modules Results  
+Module 1:  Top 3 crop recommendations  
+The model recommends top 3 crops to the user based upon his land properties – namely the n, p, k, pH, temperature and other values along with the micronutrients.  
+Other factors like regional rainfall, soil type, etc are also considered.  
+/  
+  
+/    
+Result:  
+/  
+  
+Module 2: Economically most beneficial crop (Prices prediction)  
+The prices of the top 3 crops recommended from above module are predicted. The one with the highest profit i.e economically most beneficial crop is finally recommended.  
+  /
+8.1.2 Algorithms Results Tool – 
+WEKA  
+Multiple Linear Regression  
+Random Tree.  
+Weka is one of the easiest, simple, widely used and tested open source machine learning exploration software. It contains provisions for data pre-processing, implementing classification algorithms, regression algorithms, clustering algorithms, understanding association rules, and provides visualization.  
+Thus we have implemented multiple linear regression, a supervised machine learning algorithm. Here dataset containing fields relative to recommendation of crop based on land features was used. It included fields like NPK values, average rainfall value, temperature and the suitable crop (class label). Further crops were given certain  
+/
+ Figure 8.1 WEKA Tool  
+ 
+WEKA. It helped us understand the impact of each field on predicted output.  
+Thus in the above picture as we can see, say 0.119 units of rise in temp affects 1 unit prediction of crop. Also the mean absolute error, root mean squared error, etc of algorithm can be studied. This will help us compare various algorithms and its efficiency.   
+The second algorithm implemented was random tree. The implementation procedure was similar to that of multiple linear regression. The extra functionalities explored specifically of decision tree with the help of weka tool was to easily identify the split decision that tool identified. This could be done by effective visualization provided by tree.  
+/ 
+  
+Figure 8.2 Decision Tree Algorithm 
+Thus the tree shows that the algorithm has used pH as the first split field. And following various decisions the leaf node will be the recommended crop. Here  a supervised classification technique is used to classify the input tuple into its respective class of crop.  
+This module also displays the error values to be considered as metrics for decision of selection of algorithm.  
+Tool – Scikit library python  
+Multiple Linear Regression  
+Logistic Regression  
+Decision Tree  
+K Nearest Neighbours  
+  
+Scikit-learn are a data science based library in Python that provides us with many unsupervised and supervised learning algorithms to explore and learn. It’s built upon the technology stack like NumPy, pandas, and Matplotlib. The functionality that scikitlearn provides us include: Regression – including Linear regression and Logistic  
+Regression, Classification – including K-Nearest Neighbors, Clustering – including 
+Kmeans and K-Means++,  Model selection, Preprocessing – including Min-Max Normalization.  
+The dataset imported for implementation of these algorithms contained fields relative to recommendation of crop based on land features. It included fields like NPK values, average rainfall value, temperature and the suitable crop (class label). Further crops were given certain respective numeric values say 1 for bajra, 2 for rice, etc.  Data was divided into training and testing tuples. And it was preprocessed to scale the values. This was common in all the algorithms. Further individual algorithms were implemented by using in built methods of the scikit library. Accuracy output of individual algorithms was observed to be:  
+Multiple Linear Regression  
+/   
+Figure 8.3 Multiple Linear Regression  
+Observed error and the variance between actual and predicted values is thus seen. A visual graph is generated using matplotlib.  
+Decision Tree  
+  
+/   
+                                            Figure 8.4 Decision Tree  
+  
+  
+ 
+ 
+K Nearest Neighbours  
+/   
+Figure 8.5 KNN  
+Comment:  
+APIs of the above mentioned algorithms were generated. Thus instead of loading the entire dataset and running the code on client side, the api is generated on server side beforehand. 
+Further only the api is called on the client side.  
+Logistic regression was the choice of algorithm for the base model due to its better prediction and higher rate of accuracy.  
+Other algorithms are kept open for researcher for study and exploration.  
+  
+  
+CHAPTER 9: CONCLUSION 
+ 
+9.1 CONCLUSION  
+Summing up, as the last year project an attempt is made to bridge the gap between labour, finance, land etc. invested in agriculture and yet its lower contribution to GDP. The datasets needed for the project have been gathered. It includes datasets with fields of land properties, environmental factors as well as the future price consideration of crops. Interactions with various agricultural colleges, labs and experts have been done for the same. The functioning of entire system is designed in a way to include:  
+Economically beneficial Crop recommendation  
+Crop pattern decision support through a particular time  
+Conditions and precautions to be observed for a particular crop and particular ownership  
+Awareness on various government schemes   
+Other simple but influential functionalities  
+As mentioned, data analytics and machine learning are the main domain areas focused on technically. Learning exposure in fields of deep learning and UI development through usage of Django is targeted. Whereas learnings done till now include:  
+On field data acquisition  
+Understanding of Soil Health Card  
+Exploring pre-processing tool (rapidminer).  
+Algorithms implementation – scikit and tool (weka).  
+Exploration of LUCID platform.  
+Responsive web pages concept.  
+Interactions with MSC research students and Agriculture college officials to understand the problems in depth.  
+The algorithms to be worked upon have been decided and will help in establishing a new dimension in the proposed work. Gap identification and thus bridging it is what makes this an innovative approach to a real-world problem.  
+ 
+ 
+9.2 FUTURE WORK  
+Nothing is ever completely done. So a lot of aspects have been considered which reflect in the mentioned future scope:  
+To include use of IOT sensors to automatically collect soil data.  
+To increase granularity of rainfall prediction.  
+To suggest suitable fertilizers and pesticides for the crop.  
+To analyze and predict requirements of import and export.  
+To consider market demand in prediction.  
+To personalize application to a level where individual farmer can use it for private land.  
+To suggest variance in crop production if adjacent lands decide upon the same crops.  
+9.3 APPLICATIONS  
+Smart Farming can have further applications like:  
+Advertisement of soil testing laboratories through the web app which may result in some extra revenue and business value.  
+Along with the base crops included in the model, similarly the app can be used for extended farming areas like horticulture, mushroom projects, fruits, other cash crops, etc  
+Soil Health Card summarization can also be an extended application and functionality of the web app.  
+  
+  
+ 
+ 
+ 
+ 
+ 
+APPENDIX B 
+/ 
+  
+ 
+  
+ 
+ 
+REFERENCES 
+Crop Selection Method to Maximize Crop Yield Rate using Machine Learning Technique [IEEE 2015] - Rakesh Kumar1, M.P. Singh2, Prabhat Kumar3 and J.P. Singh  
+Prediction of Future Market Price for Agricultural Commodities [International Journal of System and Software Engineering 2015] - Sagar Pathane, Uttam Patil, Nandini  Sidnal  
+CROP PREDICTION USING PREDICTIVE ANALYTICS [IEEE 2017] - P.  
+S. Vijayabaskar, Sreemathi.R, Keertanaa.E  
+Predictive Analysis to Improve Crop Yield using a Neural Network Model [IEEE 2018] - Shruti Kulkarni, Shah Nawaz Mandal, G Srivatsa Sharma, Monica R Mundada, Meeradevi  
+Recommendation System for Crop Identification and Pest Control Technique in 
+Agriculture [IEEE 2019] - Avinash Kumar, Sobhangi Sarkar and Chittaranjan Pradhan   
+Crop Yield Prediction and Efficient use of Fertilizers [IEEE 2019] - S.Bhanumathi, M.Vineeth and N.Rohit  
+Decision Making Support System for Prediction of Prices in Agricultural Commodity 
+[IEEE 2019] - Aman Vohra1, Nitin Pandey2, S.K. Khatri3   
+https://agmarknet.gov.in/  
+https://data.gov.in/sectors/Agriculture-9212  
+https://medium.com/deep-math-machine-learning-ai/chapter-4-decisiontreesalgorithms-b93975f7a1f1  
+ 
+ 
 
 --------------------------------------------------------------------------------
 PATH - tests\__init__.py
@@ -28409,6 +31074,159 @@ def test_explicit_entity_id_reuse() -> None:
     assert set(ent2.associated_observation_ids) == {"obs-01", "obs-02"}
     assert ent2.attributes["color"] == "blue"
     assert ent2.attributes["make"] == "Ford"
+
+--------------------------------------------------------------------------------
+PATH - tests\unit\tools\test_event_correlation_evidence.py
+CODE:
+"""Unit tests for EventCorrelatorWorker major evidence analysis and response parsing."""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+from vigil.domain.media_asset import MediaAsset
+from vigil.domain.observation import Observation
+from vigil.domain.provenance import Provenance
+from vigil.domain.source_reference import SourceReference
+from vigil.orchestration.task_types import TaskRequest
+from vigil.storage.repository import InvestigationRepository
+from vigil.tools.event_correlator import (
+    EventCorrelatorWorker,
+    parse_correlator_response,
+)
+
+
+def test_parse_correlator_response_code_fences_and_preamble() -> None:
+    """Verify parse_correlator_response strips markdown fences and extracts valid events."""
+    raw = """
+    Here is the forensic correlation analysis:
+    ```json
+    {
+      "events": [
+        {
+          "event_type": "perimeter_breach",
+          "description": "Subject climbing security fence near north gate.",
+          "observation_ids": ["obs-1", "obs-2"]
+        }
+      ],
+      "links": [
+        {
+          "from_event_index": 0,
+          "to_event_index": 1,
+          "relationship_type": "before",
+          "rationale": "Chronological occurrence."
+        }
+      ]
+    }
+    ```
+    Analysis concluded.
+    """
+    events, links = parse_correlator_response(raw)
+    assert len(events) == 1
+    assert events[0]["event_type"] == "perimeter_breach"
+    assert "climbing security fence" in events[0]["description"]
+    assert events[0]["observation_ids"] == ["obs-1", "obs-2"]
+    assert len(links) == 1
+
+
+def test_event_correlator_creates_discrete_major_evidence_clusters() -> None:
+    """Verify fallback clustering segments timeline into discrete events with descriptive summaries."""
+    repo = InvestigationRepository()
+
+    # Create media asset
+    asset = MediaAsset(
+        media_asset_id="media-cam-1",
+        media_type="video",
+        storage_uri="file:///test.mp4",
+        camera_id="cam-north",
+        duration_seconds=100.0,
+    )
+    repo.add_media_asset(asset)
+
+    prov = Provenance(producer_type="vision_model", producer_name="vlm-1", method="visual_analysis")
+
+    # Cluster 1: Person activity at 5.0s - 10.0s
+    obs1 = Observation(
+        observation_id="obs-cluster1-1",
+        modality="video",
+        observation_type="person_detection",
+        description="[cam-north] Person in dark clothing walking toward entrance.",
+        confidence=0.92,
+        source_references=[SourceReference(media_asset_id="media-cam-1", start_seconds=5.0, end_seconds=7.0)],
+        provenance=prov,
+    )
+    obs2 = Observation(
+        observation_id="obs-cluster1-2",
+        modality="video",
+        observation_type="person_detection",
+        description="[cam-north] Person inspecting entrance security door.",
+        confidence=0.88,
+        source_references=[SourceReference(media_asset_id="media-cam-1", start_seconds=7.5, end_seconds=10.0)],
+        provenance=prov,
+    )
+
+    # Cluster 2: Vehicle activity at 50.0s - 55.0s (40s time gap > 8.0s)
+    obs3 = Observation(
+        observation_id="obs-cluster2-1",
+        modality="video",
+        observation_type="vehicle_detection",
+        description="[cam-north] White delivery van pulling up to loading bay.",
+        confidence=0.95,
+        source_references=[SourceReference(media_asset_id="media-cam-1", start_seconds=50.0, end_seconds=52.5)],
+        provenance=prov,
+    )
+    obs4 = Observation(
+        observation_id="obs-cluster2-2",
+        modality="video",
+        observation_type="vehicle_detection",
+        description="[cam-north] Delivery van stopping with hazard lights activated.",
+        confidence=0.90,
+        source_references=[SourceReference(media_asset_id="media-cam-1", start_seconds=53.0, end_seconds=55.0)],
+        provenance=prov,
+    )
+
+    for o in [obs1, obs2, obs3, obs4]:
+        repo.add_observation(o)
+
+    # Mock LLM that returns invalid text to test robust forensic clustering fallback
+    failing_llm = MagicMock()
+    failing_llm.generate_text.side_effect = RuntimeError("API unavailable")
+
+    worker = EventCorrelatorWorker(repository=repo, llm_client=failing_llm)
+    req = TaskRequest(
+        task_id="task-corr-cluster",
+        task_type="event_correlation",
+        input_refs=["obs-cluster1-1", "obs-cluster1-2", "obs-cluster2-1", "obs-cluster2-2"],
+        parameters={},
+    )
+
+    event_ids = worker.run(req)
+    assert len(event_ids) == 2  # Must NOT lump everything into 1 single event
+
+    ev1 = repo.get_event(event_ids[0])
+    ev2 = repo.get_event(event_ids[1])
+
+    # Event 1 checks
+    assert ev1.event_type == "person_activity"
+    assert "Person in dark clothing" in ev1.description
+    assert ev1.start_seconds == 5.0
+    assert ev1.end_seconds == 10.0
+    assert set(ev1.observation_ids) == {"obs-cluster1-1", "obs-cluster1-2"}
+    assert "Correlated occurrence supported by visual and/or acoustic observations." not in ev1.description
+
+    # Event 2 checks
+    assert ev2.event_type == "vehicle_movement"
+    assert "White delivery van" in ev2.description
+    assert ev2.start_seconds == 50.0
+    assert ev2.end_seconds == 55.0
+    assert set(ev2.observation_ids) == {"obs-cluster2-1", "obs-cluster2-2"}
+
+    # Links check
+    links = repo.list_event_links()
+    assert len(links) >= 1
+    assert links[0].from_event_id == ev1.event_id
+    assert links[0].to_event_id == ev2.event_id
+    assert links[0].relationship_type == "before"
 
 --------------------------------------------------------------------------------
 PATH - tests\unit\tools\test_media_workers.py

@@ -1792,3 +1792,92 @@ kbd {
   color: #ef4444;
   background: rgba(239, 68, 68, 0.12);
 }
+
+/* Human Review Evidence Analysis Enhancements */
+.event-evidence-block {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin-top: 4px;
+}
+.evidence-block-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #94a3b8;
+  margin-bottom: 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.evidence-obs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.event-obs-item {
+  background: rgba(30, 41, 59, 0.75);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 0.73rem;
+  border-left: 2px solid var(--accent-blue);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.event-obs-item:hover {
+  background: rgba(51, 65, 85, 0.95);
+  border-left-color: var(--accent-cyan);
+}
+.obs-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.obs-timecode {
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+.obs-conf {
+  font-size: 0.68rem;
+  color: var(--success-green);
+  font-weight: 600;
+  margin-left: auto;
+}
+.obs-item-desc {
+  color: #e2e8f0;
+  font-size: 0.73rem;
+  line-height: 1.35;
+}
+.obs-more-hint {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  margin-top: 5px;
+  font-style: italic;
+}
+.event-assessment-box {
+  background: rgba(2, 6, 23, 0.75);
+  border: 1px dashed rgba(148, 163, 184, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  margin-top: 4px;
+}
+.assessment-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.assessment-type {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+.assessment-rationale-text {
+  font-size: 0.72rem;
+  color: #cbd5e1;
+  line-height: 1.35;
+}

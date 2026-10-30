@@ -1333,9 +1333,12 @@
       card.className = `event-card ${evt.status}`;
       card.id = `eventCard-${evt.event_id}`;
 
-      const timeRange = (evt.start_seconds !== null && evt.end_seconds !== null)
-        ? `${evt.start_seconds.toFixed(1)}s &ndash; ${evt.end_seconds.toFixed(1)}s`
-        : "-";
+      let timeRange = "-";
+      if (evt.start_seconds !== null && evt.end_seconds !== null) {
+        timeRange = `<code>${formatSecondsToTimecode(evt.start_seconds)} &ndash; ${formatSecondsToTimecode(evt.end_seconds)}</code> <small style="color:var(--text-dim)">(${evt.start_seconds.toFixed(1)}s &ndash; ${evt.end_seconds.toFixed(1)}s)</small>`;
+      } else if (evt.start_seconds !== null) {
+        timeRange = `<code>${formatSecondsToTimecode(evt.start_seconds)}</code> <small style="color:var(--text-dim)">(${evt.start_seconds.toFixed(1)}s)</small>`;
+      }
 
       let reviewNotesHtml = "";
       if (evt.reviewer || evt.review_notes) {
@@ -1352,6 +1355,64 @@
         cameraBadgeHtml = `<span class="badge cam-badge">${matchedCam.camera_id.toUpperCase()}</span>`;
       }
 
+      // Supporting Observations Breakdown
+      const supportingObs = (evt.observation_ids || [])
+        .map(id => state.observations.find(o => o.observation_id === id))
+        .filter(Boolean);
+
+      let evidenceHtml = "";
+      if (supportingObs.length > 0) {
+        const displayObs = supportingObs.slice(0, 3);
+        const remainingCount = supportingObs.length - displayObs.length;
+        const obsItemsHtml = displayObs.map(obs => {
+          const sr = obs.source_references && obs.source_references.length > 0 ? obs.source_references[0] : null;
+          const tStr = sr && sr.start_seconds !== null ? formatSecondsToTimecode(sr.start_seconds) : "-";
+          const cleanD = cleanObservationDesc(obs.description);
+          const confP = obs.confidence !== null ? `${Math.round(obs.confidence * 100)}%` : "";
+          const targetAsset = sr?.media_asset_id || "";
+          return `
+            <div class="event-obs-item" title="Click to jump to this evidence in video player" data-time="${sr?.start_seconds || 0}" data-asset="${targetAsset}">
+              <div class="obs-item-head">
+                <span class="modality-badge modality-${obs.modality}">${obs.modality.toUpperCase()}</span>
+                <span class="obs-timecode">${tStr}</span>
+                ${confP ? `<span class="obs-conf">${confP}</span>` : ""}
+              </div>
+              <div class="obs-item-desc">${escapeHtml(cleanD)}</div>
+            </div>
+          `;
+        }).join("");
+
+        evidenceHtml = `
+          <div class="event-evidence-block">
+            <div class="evidence-block-title">
+              <span>Supporting Observations: <strong>${supportingObs.length}</strong></span>
+              <span style="font-size:0.68rem; color:var(--text-dim);">&#x25B6; Click item to seek</span>
+            </div>
+            <div class="evidence-obs-list">
+              ${obsItemsHtml}
+            </div>
+            ${remainingCount > 0 ? `<div class="obs-more-hint">+ ${remainingCount} more supporting observation(s) in repository</div>` : ""}
+          </div>
+        `;
+      }
+
+      // Evidence Quality Assessment
+      const eventAssessment = state.assessments.find(a => a.target_id === evt.event_id);
+      let assessmentHtml = "";
+      if (eventAssessment) {
+        const rat = eventAssessment.rating || "moderate";
+        const cleanRat = cleanRationaleText(eventAssessment.rationale || "");
+        assessmentHtml = `
+          <div class="event-assessment-box">
+            <div class="assessment-head">
+              <span class="rating-badge rating-${rat}">QUALITY: ${rat.toUpperCase()}</span>
+              <span class="assessment-type">${escapeHtml(eventAssessment.assessment_type.replace(/_/g, " ").toUpperCase())}</span>
+            </div>
+            ${cleanRat ? `<div class="assessment-rationale-text">${escapeHtml(cleanRat)}</div>` : ""}
+          </div>
+        `;
+      }
+
       card.innerHTML = `
         <div class="event-card-head">
           <div style="display:flex; align-items:center; gap:6px;">
@@ -1361,7 +1422,9 @@
           <span class="status-pill status-${evt.status}">${evt.status}</span>
         </div>
         <div class="event-card-id">#${evt.event_id} &bull; Interval: <strong>${timeRange}</strong></div>
-        <div class="event-card-desc">${escapeHtml(evt.description)}</div>
+        <div class="event-card-desc"><strong>${escapeHtml(evt.description)}</strong></div>
+        ${evidenceHtml}
+        ${assessmentHtml}
         ${reviewNotesHtml}
         <div class="event-card-actions">
           <button class="btn btn-sm btn-confirm" data-id="${evt.event_id}" title="Confirm Verified Event (Removes from pending queue)">&#x2714; Confirm</button>
@@ -1397,6 +1460,17 @@
 
       // Slice Incident Clip
       card.querySelector(".btn-clip").addEventListener("click", () => sliceEventClipDirectly(evt.event_id));
+
+            // Seek to observation moment on clicking evidence item
+      card.querySelectorAll(".event-obs-item").forEach(item => {
+        item.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const targetTime = parseFloat(item.getAttribute("data-time") || 0);
+          const targetAsset = item.getAttribute("data-asset");
+          if (targetAsset) switchCameraFeed(targetAsset, false);
+          if (!isNaN(targetTime)) el.mainVideoPlayer.currentTime = targetTime;
+        });
+      });
 
       el.eventsList.appendChild(card);
     });
