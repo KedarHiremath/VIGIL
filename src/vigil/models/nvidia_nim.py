@@ -1,4 +1,4 @@
-﻿"""NVIDIA NIM client for hosted VLM and LLM inference.
+"""NVIDIA NIM client for hosted VLM and LLM inference.
 
 Dual-model design
 -----------------
@@ -56,6 +56,12 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from vigil.models.base import BaseLLMClient, LLMResponse
+from vigil.models.vlm_preprocessor import (
+    GreedyKnapsackBatcher,
+    ImageBatch,
+    Llama32VisionPreprocessor,
+    PreprocessedImage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +79,7 @@ NVIDIA_VLM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 # Default model identifiers (can be overridden via env / constructor)
 DEFAULT_VLM_MODEL = "meta/llama-3.2-11b-vision-instruct"
+FALLBACK_VLM_MODEL = "nvidia/nemotron-3.5-super-vl-120b-a12b"
 DEFAULT_LLM_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 
 # HTTP status codes that are transient and worth retrying automatically
@@ -216,6 +223,7 @@ class NvidiaNIMClient(BaseLLMClient):
         timeout_seconds: float = 120.0,
         max_retries: int = 5,
         retry_backoff_base: float = 2.0,
+        auto_shrink: bool = True,
     ) -> None:
         if not api_key:
             raise ValueError(
@@ -240,6 +248,9 @@ class NvidiaNIMClient(BaseLLMClient):
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.retry_backoff_base = retry_backoff_base
+        self.auto_shrink = auto_shrink
+        self._preprocessor = Llama32VisionPreprocessor()
+        self._batcher = GreedyKnapsackBatcher()
 
         logger.info(
             "NvidiaNIMClient initialised — LLM: %s [%s] | VLM: %s [%s]",
@@ -378,6 +389,18 @@ class NvidiaNIMClient(BaseLLMClient):
                         break  # success — exit retry loop
                     except urllib.error.HTTPError as exc:
                         err_body = exc.read().decode("utf-8", errors="replace")
+                        if exc.code == 404 and ("is not found" in err_body or "Not found for account" in err_body):
+                            if model != FALLBACK_VLM_MODEL:
+                                logger.warning(
+                                    "NvidiaNIMClient: model '%s' is not enabled on this NVIDIA account. "
+                                    "Automatically switching to verified fallback VLM: '%s'.",
+                                    model,
+                                    FALLBACK_VLM_MODEL,
+                                )
+                                self.vlm_model = FALLBACK_VLM_MODEL
+                                payload["model"] = FALLBACK_VLM_MODEL
+                                data = json.dumps(payload).encode("utf-8")
+                                continue
                         if exc.code in _RETRYABLE_HTTP_CODES and attempt < self.max_retries:
                             last_exc = RuntimeError(
                                 f"HTTP {exc.code}: {exc.reason} — {err_body[:200]}"
@@ -413,11 +436,12 @@ class NvidiaNIMClient(BaseLLMClient):
                 f"Raw response: {resp_data}"
             )
 
-        content = choices[0].get("message", {}).get("content", "")
+        msg = choices[0].get("message", {})
+        content = msg.get("content") or msg.get("reasoning_content") or "" 
         usage = resp_data.get("usage", {})
         return LLMResponse(
             content=content,
-            model_name=model,
+            model_name=payload.get("model", model),
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
         )
@@ -498,7 +522,15 @@ class NvidiaNIMClient(BaseLLMClient):
                 raise NvidiaNIMError(
                     f"analyze_image: image file not found or unreadable: '{image_data}'"
                 )
-            image_url_value = f"data:{mime_type};base64,{b64}"
+            if self.auto_shrink:
+                try:
+                    preprocessed = self._preprocessor.preprocess_image(image_data, mode="optimal")
+                    image_url_value = preprocessed.data_uri
+                except Exception as exc:
+                    logger.debug("NvidiaNIMClient auto-shrink fallback: %s", exc)
+                    image_url_value = f"data:{mime_type};base64,{b64}"
+            else:
+                image_url_value = f"data:{mime_type};base64,{b64}"
 
         messages: list[dict[str, Any]] = []
         if system_instruction:
@@ -518,3 +550,61 @@ class NvidiaNIMClient(BaseLLMClient):
             messages,
             json_mode=json_mode,
         )
+
+    def analyze_image_batch(
+        self,
+        prompt: str,
+        images: list[Any],
+        system_instruction: str | None = None,
+        json_mode: bool = False,
+        shrink_mode: str = "compact",
+        strategy: str = "sequential",
+        temperature: float = 0.1,
+        max_tokens: int = 2048,
+    ) -> list[LLMResponse]:
+        """Analyse multiple images greedily allocated to fit build.nvidia HTTP limits.
+
+        Pre-shrinks images according to Llama 3.2 Vision's 560x560 tile requirements,
+        packs them into the minimum number of HTTP requests without exceeding the
+        180KB inline Base64 ceiling, and dispatches to NVIDIA NIM.
+        """
+        if not images:
+            return []
+
+        processed_items: list[PreprocessedImage] = []
+        for idx, img in enumerate(images):
+            if isinstance(img, PreprocessedImage):
+                processed_items.append(img)
+            else:
+                p = self._preprocessor.preprocess_image(
+                    img,
+                    mode=shrink_mode,
+                    identifier=f"frame_{idx:03d}",
+                )
+                processed_items.append(p)
+
+        batches = self._batcher.allocate_batches(processed_items, strategy=strategy)
+        logger.info(
+            "NvidiaNIMClient: packed %d images into %d HTTP requests using greedy knapsack",
+            len(images),
+            len(batches),
+        )
+
+        responses: list[LLMResponse] = []
+        for b in batches:
+            messages = self._batcher.build_nim_multimodal_message(
+                prompt=prompt,
+                batch=b,
+                system_instruction=system_instruction,
+            )
+            resp = self._call_completions(
+                self.vlm_model,
+                self._vlm_base_url,
+                messages,
+                json_mode=json_mode,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            responses.append(resp)
+
+        return responses
