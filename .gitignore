@@ -55,3 +55,5 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+VLM_Accelerator
