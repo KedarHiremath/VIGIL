@@ -56,6 +56,7 @@ class VigilConfig:
     # ------------------------------------------------------------------
     storage_root: str = "./storage_data"
     log_level: str = "INFO"
+    max_analysis_frames: int = 100
     report_max_evidence_frames: int = 3
 
     @classmethod
@@ -115,6 +116,7 @@ class VigilConfig:
             ),
             storage_root=os.getenv("VIGIL_STORAGE_ROOT", "./storage_data"),
             log_level=os.getenv("VIGIL_LOG_LEVEL", "INFO"),
+            max_analysis_frames=int(os.getenv("VIGIL_MAX_ANALYSIS_FRAMES", "100")),
             report_max_evidence_frames=int(
                 os.getenv("VIGIL_REPORT_MAX_EVIDENCE_FRAMES", "3")
             ),

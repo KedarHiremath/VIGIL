@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import uuid
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ import cv2
 
 from vigil.domain.camera import Camera
 from vigil.domain.media_asset import MediaAsset
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,48 @@ class MediaMetadataExtractor:
             while chunk := f.read(65536):
                 hasher.update(chunk)
         return hasher.hexdigest()
+
+    @classmethod
+    def _probe_duration(cls, path: Path, has_video: bool, has_audio: bool) -> float | None:
+        """Thoroughly probe media duration by packet scanning if headers lack duration."""
+        # Try PyAV packet demuxing for last timestamp
+        try:
+            with av.open(str(path)) as container:
+                last_pts: int | None = None
+                time_base: float | None = None
+                target_stream = None
+
+                if has_video and container.streams.video:
+                    target_stream = container.streams.video[0]
+                elif has_audio and container.streams.audio:
+                    target_stream = container.streams.audio[0]
+
+                if target_stream is not None:
+                    time_base = float(target_stream.time_base) if target_stream.time_base else None
+                    for packet in container.demux(target_stream):
+                        if packet.pts is not None:
+                            last_pts = packet.pts
+                    if last_pts is not None and time_base is not None and time_base > 0:
+                        probed = float(last_pts * time_base)
+                        if probed > 0:
+                            return probed
+        except Exception as exc:
+            logger.debug("PyAV packet duration probe failed for %s: %s", path, exc)
+
+        # Try OpenCV frame count / fps
+        if has_video:
+            try:
+                cap = cv2.VideoCapture(str(path))
+                if cap.isOpened():
+                    fps = float(cap.get(cv2.CAP_PROP_FPS))
+                    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    cap.release()
+                    if fps > 0 and frame_count > 0:
+                        return float(frame_count) / fps
+            except Exception as exc:
+                logger.debug("OpenCV duration probe failed for %s: %s", path, exc)
+
+        return None
 
     @classmethod
     def extract(cls, file_path: str | Path) -> MediaMetadata:
@@ -116,6 +161,13 @@ class MediaMetadataExtractor:
                 duration = container_duration or video_duration or audio_duration
                 if (duration is None or duration <= 0) and has_video and fps and frame_count:
                     duration = float(frame_count) / fps
+
+                # If duration is still undetermined for audio/video, probe it
+                if (duration is None or duration <= 0) and (has_video or has_audio):
+                    probed = cls._probe_duration(path, has_video, has_audio)
+                    if probed is not None and probed > 0:
+                        duration = probed
+
                 if duration is None or duration <= 0:
                     duration = 0.0
 
